@@ -1,0 +1,43 @@
+{
+  "name": "transcriptsync",
+  "version": "0.1.0",
+  "description": "Electron desktop app that embeds an audio website and auto-scrolls a PDF transcript using real-time speech-to-text.",
+  "main": "main.js",
+  "private": true,
+  "author": "Kieran Barter",
+  "license": "UNLICENSED",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win"
+  },
+  "dependencies": {
+    "electron-store": "^8.2.0",
+    "fuse.js": "^7.0.0",
+    "pdfjs-dist": "^3.11.174"
+  },
+  "devDependencies": {
+    "electron": "^31.3.1",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.kieran.transcriptsync",
+    "productName": "TranscriptSync",
+    "win": {
+      "target": "nsis"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "src/**/*",
+      "renderer/**/*",
+      "python/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "python",
+        "to": "python"
+      }
+    ]
+  }
+}

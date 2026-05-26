@@ -1,0 +1,11 @@
+node_modules/
+dist/
+out/
+*.log
+__pycache__/
+.venv/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+config.json

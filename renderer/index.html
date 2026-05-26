@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; connect-src *;" />
+  <title>TranscriptSync</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+    <header id="toolbar">
+      <button id="btn-load-pdf">Load PDF</button>
+      <button id="btn-listen">● Listen</button>
+      <button id="btn-stop" disabled>▐▐ Pause</button>
+
+      <nav id="tabs" role="tablist">
+        <button class="tab active" data-tab="transcript" role="tab">Transcript</button>
+        <button class="tab" data-tab="browser" role="tab">Browser</button>
+      </nav>
+
+      <div id="zoom-controls" aria-label="Text zoom">
+        <button id="btn-zoom-out" title="Zoom out">−</button>
+        <span id="zoom-level">100%</span>
+        <button id="btn-zoom-in" title="Zoom in">+</button>
+      </div>
+
+      <span id="status" data-state="idle">Idle</span>
+      <span id="paragraph-count"></span>
+
+      <button id="btn-settings" title="Settings">Settings</button>
+      <button id="btn-theme" title="Toggle light/dark theme">Dark</button>
+    </header>
+
+    <main id="content">
+      <section id="tab-transcript" class="tab-panel active" role="tabpanel">
+        <div id="scroll-area">
+          <div id="transcript-empty" class="placeholder">
+            <h2>No transcript loaded</h2>
+            <p>Click <strong>Load PDF</strong> to pick a transcript.</p>
+          </div>
+          <article id="document-page" hidden>
+            <div id="transcript"></div>
+          </article>
+        </div>
+      </section>
+
+      <section id="tab-browser" class="tab-panel" role="tabpanel">
+        <webview
+          id="audioSite"
+          partition="persist:audiosession"
+          allowpopups
+          webpreferences="contextIsolation=yes"
+        ></webview>
+      </section>
+    </main>
+
+    <dialog id="settings-dialog">
+      <form method="dialog">
+        <h2>Settings</h2>
+
+        <fieldset>
+          <legend>Audio site auto-login</legend>
+          <p class="hint">Credentials are encrypted via your OS keychain (DPAPI on Windows). They never leave this machine.</p>
+
+          <label>
+            <span>Username / Email</span>
+            <input type="text" id="settings-username" autocomplete="off" spellcheck="false" />
+          </label>
+
+          <label>
+            <span>Password</span>
+            <input type="password" id="settings-password" autocomplete="off" />
+          </label>
+
+          <label class="checkbox-label">
+            <input type="checkbox" id="settings-autosubmit" checked />
+            <span>Auto-submit after filling</span>
+          </label>
+        </fieldset>
+
+        <fieldset>
+          <legend>Alignment</legend>
+          <p class="hint">Controls how the transcript text matches the audio stream.</p>
+
+          <label>
+            <span>Match threshold <em>(lower = stricter; 0.10–0.80)</em></span>
+            <input type="number" id="settings-fuse-threshold" min="0.10" max="0.80" step="0.05" />
+          </label>
+
+          <label>
+            <span>Window expansion rate <em>(paragraphs/sec; 0.1–5.0)</em></span>
+            <input type="number" id="settings-paragraphs-per-sec" min="0.1" max="5.0" step="0.1" />
+          </label>
+        </fieldset>
+
+        <fieldset>
+          <legend>Scroll behaviour</legend>
+          <p class="hint">Tune the smoothness of the auto-scroll. Changes apply immediately.</p>
+
+          <label>
+            <span>Correction speed <em>(P gain; 0.05–2.0)</em></span>
+            <input type="number" id="settings-scroll-gain" min="0.05" max="2.0" step="0.05" />
+          </label>
+
+          <label>
+            <span>Baseline drift <em>(px/sec; 0–60)</em></span>
+            <input type="number" id="settings-scroll-baseline" min="0" max="60" step="1" />
+          </label>
+
+          <label>
+            <span>Max velocity <em>(px/sec; 20–400)</em></span>
+            <input type="number" id="settings-scroll-max" min="20" max="400" step="10" />
+          </label>
+        </fieldset>
+
+        <fieldset>
+          <legend>Advanced</legend>
+          <label class="checkbox-label">
+            <input type="checkbox" id="settings-verbose-logging" />
+            <span>Verbose PDF parser logging <em>(full speakers map + rejected rows)</em></span>
+          </label>
+        </fieldset>
+
+        <div class="dialog-actions">
+          <button type="button" id="settings-clear">Clear saved</button>
+          <span style="flex: 1;"></span>
+          <button type="button" id="settings-cancel">Cancel</button>
+          <button type="button" id="settings-save" class="primary">Save</button>
+        </div>
+      </form>
+    </dialog>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
