@@ -4,6 +4,9 @@ const els = {
   stopBtn: document.getElementById('btn-stop'),
   themeBtn: document.getElementById('btn-theme'),
   settingsBtn: document.getElementById('btn-settings'),
+  focusBtn: document.getElementById('btn-focus'),
+  focusExitBtn: document.getElementById('btn-focus-exit'),
+  fullscreenBtn: document.getElementById('btn-fullscreen'),
   zoomInBtn: document.getElementById('btn-zoom-in'),
   zoomOutBtn: document.getElementById('btn-zoom-out'),
   zoomLevel: document.getElementById('zoom-level'),
@@ -15,6 +18,7 @@ const els = {
   status: document.getElementById('status'),
   paragraphCount: document.getElementById('paragraph-count'),
   transcript: document.getElementById('transcript'),
+  transcriptTitle: document.getElementById('transcript-title'),
   transcriptEmpty: document.getElementById('transcript-empty'),
   documentPage: document.getElementById('document-page'),
   scrollArea: document.getElementById('scroll-area'),
@@ -45,8 +49,8 @@ const state = {
 // ---- Scroll controller defaults (overridable per-instance from config) ----
 const SCROLL_GAIN_DEFAULT = 0.35;
 const SCROLL_MAX_V_DEFAULT = 90;
-const SCROLL_BASELINE_V_DEFAULT = 8;
-const SCROLL_STOP_OVERSHOOT = 80;
+const SCROLL_BASELINE_V_DEFAULT = 4;
+const SCROLL_DEAD_ZONE = 40; // px from target before we taper to zero velocity
 
 // ---- Zoom levels ----
 const ZOOM_LEVELS = [0.75, 0.85, 0.95, 1.0, 1.1, 1.25, 1.4, 1.6, 1.8, 2.0];
@@ -101,6 +105,16 @@ class ScrollController {
     this.userPausedUntil = Date.now() + (ms || state.autoScrollResumeDelay);
   }
 
+  pauseIndefinitely() {
+    this.target = null;
+    this.userPausedUntil = Number.POSITIVE_INFINITY;
+  }
+
+  resume() {
+    this.userPausedUntil = 0;
+    this.scrollPos = this.pane.scrollTop;
+  }
+
   _tick(now) {
     if (!this.running) return;
     const dt = Math.min(0.05, (now - this.lastTick) / 1000);
@@ -112,10 +126,18 @@ class ScrollController {
       const paneCenter = this.scrollPos + this.pane.clientHeight / 2;
       const error = this.target - paneCenter;
 
+      // Decay-to-stop: velocity reaches 0 as the active paragraph nears the
+      // viewport centre, and stays 0 if we have already passed it. This
+      // prevents the page from drifting forward at baseline after a big
+      // catch-up jump when no new detections are arriving.
       let velocity;
-      if (error < -SCROLL_STOP_OVERSHOOT) velocity = 0;
-      else if (error < 0)                 velocity = this.baselineVelocity;
-      else                                velocity = Math.min(this.maxVelocity, this.baselineVelocity + error * this.gain);
+      if (error <= 0) {
+        velocity = 0;
+      } else if (error < SCROLL_DEAD_ZONE) {
+        velocity = this.baselineVelocity * (error / SCROLL_DEAD_ZONE);
+      } else {
+        velocity = Math.min(this.maxVelocity, error * this.gain);
+      }
 
       if (velocity > 0) {
         this.scrollPos += velocity * dt;
@@ -245,11 +267,23 @@ async function init() {
   els.stopBtn.addEventListener('click', onStop);
   els.themeBtn.addEventListener('click', toggleTheme);
   els.settingsBtn.addEventListener('click', openSettings);
+  els.focusBtn.addEventListener('click', toggleFocusMode);
+  els.focusExitBtn.addEventListener('click', () => setFocusMode(false));
+  els.fullscreenBtn.addEventListener('click', () => window.api.toggleFullScreen());
+  window.api.onFullScreenChanged((isFull) => updateFullScreenButton(isFull));
+  window.api.isFullScreen().then(updateFullScreenButton).catch(() => {});
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && document.body.classList.contains('focus-mode')) {
+      setFocusMode(false);
+    }
+  });
+  initFocusMode();
   els.zoomInBtn.addEventListener('click', () => stepZoom(+1));
   els.zoomOutBtn.addEventListener('click', () => stepZoom(-1));
 
   initSettingsDialog();
   initAutoLogin();
+  initCopyBlock();
 
   const onUserScroll = () => scrollController.pauseForUserScroll();
   els.scrollArea.addEventListener('wheel', onUserScroll, { passive: true });
@@ -258,9 +292,13 @@ async function init() {
     if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End'].includes(e.key)) onUserScroll();
   });
 
-  window.api.onPdfLoaded(({ paragraphs }) => renderParagraphs(paragraphs));
+  window.api.onPdfLoaded((payload) => {
+    const { title, paragraphs } = payload || {};
+    renderParagraphs(paragraphs || [], title || null);
+  });
   window.api.onPositionUpdate((payload) => onPositionUpdate(payload));
   window.api.onStatusUpdate(({ message, state: s }) => updateStatus(message, s));
+  window.api.onTabActivate((name) => activateTab(name));
 }
 
 async function onLoadPdf() {
@@ -277,6 +315,7 @@ function onListen() {
   state.isListening = true;
   els.listenBtn.disabled = true;
   els.stopBtn.disabled = false;
+  if (scrollController) scrollController.resume();
 }
 
 function onStop() {
@@ -284,9 +323,17 @@ function onStop() {
   state.isListening = false;
   els.listenBtn.disabled = false;
   els.stopBtn.disabled = true;
+  if (scrollController) scrollController.pauseIndefinitely();
 }
 
-function renderParagraphs(paragraphs) {
+function renderParagraphs(paragraphs, title) {
+  if (title) {
+    els.transcriptTitle.textContent = title;
+    els.transcriptTitle.hidden = false;
+  } else {
+    els.transcriptTitle.textContent = '';
+    els.transcriptTitle.hidden = true;
+  }
   els.transcript.innerHTML = '';
   state.paragraphNodes = paragraphs.map((para, i) => {
     const p = document.createElement('p');
@@ -393,6 +440,55 @@ function stepZoom(delta) {
   if (next === zoomIdx) return;
   zoomIdx = next;
   applyZoom();
+}
+
+// ============================================================
+// Copy block (transcript text is sensitive / copyright)
+// ============================================================
+
+function initCopyBlock() {
+  const insideTranscript = (target) =>
+    target instanceof Node && els.transcript.contains(target);
+
+  const block = (e) => {
+    if (insideTranscript(e.target)) e.preventDefault();
+  };
+  ['copy', 'cut', 'contextmenu', 'dragstart', 'selectstart'].forEach((ev) => {
+    document.addEventListener(ev, block);
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    const insideScroll = els.scrollArea.contains(document.activeElement) ||
+      insideTranscript(document.activeElement);
+    if (!insideScroll && document.activeElement !== document.body) return;
+    const k = e.key.toLowerCase();
+    if (k === 'a' || k === 'c' || k === 'x') {
+      // Only swallow when focus isn't in a form field (settings dialog).
+      const tag = (document.activeElement && document.activeElement.tagName) || '';
+      if (tag !== 'INPUT' && tag !== 'TEXTAREA') e.preventDefault();
+    }
+  });
+}
+
+// ============================================================
+// Focus mode
+// ============================================================
+
+function setFocusMode(on) {
+  document.body.classList.toggle('focus-mode', on);
+  localStorage.setItem('focusMode', on ? '1' : '0');
+}
+function toggleFocusMode() {
+  setFocusMode(!document.body.classList.contains('focus-mode'));
+}
+function initFocusMode() {
+  if (localStorage.getItem('focusMode') === '1') setFocusMode(true);
+}
+
+function updateFullScreenButton(isFull) {
+  if (!els.fullscreenBtn) return;
+  els.fullscreenBtn.textContent = isFull ? '⛶ Exit fullscreen' : '⛶ Fullscreen';
 }
 
 // ============================================================

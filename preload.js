@@ -18,4 +18,9 @@ contextBridge.exposeInMainWorld('api', {
   onPdfLoaded: (cb) => ipcRenderer.on('pdf:loaded', (_, payload) => cb(payload)),
   onPositionUpdate: (cb) => ipcRenderer.on('position:update', (_, payload) => cb(payload)),
   onStatusUpdate: (cb) => ipcRenderer.on('status:update', (_, payload) => cb(payload)),
+  onTabActivate: (cb) => ipcRenderer.on('tab:activate', (_, payload) => cb(payload)),
+
+  toggleFullScreen: () => ipcRenderer.invoke('window:toggle-fullscreen'),
+  isFullScreen: () => ipcRenderer.invoke('window:is-fullscreen'),
+  onFullScreenChanged: (cb) => ipcRenderer.on('window:fullscreen-changed', (_, isFull) => cb(isFull)),
 });

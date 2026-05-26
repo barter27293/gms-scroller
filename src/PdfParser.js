@@ -283,6 +283,62 @@ function stitchParagraphs(lines) {
   return paragraphs;
 }
 
+// Detect the document title by matching the structured 3-line block that
+// these transcripts use, somewhere in the first few pages:
+//   1. [TYPE OF MEETING] AT [PLACE]   (mostly uppercase, contains " AT ")
+//   2. [Speaker]                       (initials + surname, e.g. "B.D. Hales")
+//   3. [Date]                          (weekday, Month day, year)
+// Returns { title, lastTitleLineIdx } where lastTitleLineIdx is the index
+// within `allLines` of the LAST line of the title block, or null if no
+// plausible title was found.
+const TITLE_MEETING_RE = /^[A-Z][A-Z'’&.,\- ]*\s+AT\s+[A-Z][A-Z'’&.,\- ]+$/;
+const TITLE_DATE_RE =
+  /^(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat)[a-z]*\.?,?\s+[A-Z][a-z]+\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{2,4}\b/i;
+const TITLE_SPEAKER_RE =
+  /^(?:(?:Mc)?[A-Z]\.\s*){1,5}(?:Mc)?[A-Z][a-z]+(?:[\s\-][A-Z][a-z]+)*\.?$/;
+
+function detectTitle(allLines, opts = {}) {
+  const maxPage = opts.maxPage || 4;
+
+  for (let i = 0; i < allLines.length; i++) {
+    const line = allLines[i];
+    if (line.pageNum > maxPage) break;
+    const text = line.text.trim();
+    if (!TITLE_MEETING_RE.test(text)) continue;
+
+    // Look at the next few lines on the same page for the date line.
+    // The speaker line (if present and matching) sits between meeting and date.
+    let dateIdx = -1;
+    let speakerIdx = -1;
+    const end = Math.min(allLines.length, i + 6);
+    for (let j = i + 1; j < end; j++) {
+      const next = allLines[j];
+      if (next.pageNum !== line.pageNum) break;
+      const t = next.text.trim();
+      if (TITLE_DATE_RE.test(t)) {
+        dateIdx = j;
+        break;
+      }
+      if (speakerIdx === -1 && TITLE_SPEAKER_RE.test(t)) speakerIdx = j;
+    }
+
+    if (dateIdx < 0) continue;
+
+    const parts = [line];
+    if (speakerIdx > 0 && speakerIdx < dateIdx) parts.push(allLines[speakerIdx]);
+    parts.push(allLines[dateIdx]);
+
+    const title = parts
+      .map((l) => l.text.trim())
+      .filter(Boolean)
+      .join(' — ');
+
+    return { title, lastTitleLineIdx: dateIdx };
+  }
+
+  return { title: null, lastTitleLineIdx: -1 };
+}
+
 function trimBeforeHeading(paragraphs) {
   for (let i = 0; i < paragraphs.length; i++) {
     const m = paragraphs[i].match(HEADING_PATTERN);
@@ -341,7 +397,18 @@ async function parse(filePath, opts = {}) {
     allLines.push(...lines);
   }
 
-  const { speakers, lines: contentLines } = extractSpeakers(allLines, verbose);
+  const { title, lastTitleLineIdx } = detectTitle(allLines);
+  if (title) {
+    console.log(`[PdfParser] detected title: "${title}"`);
+  }
+
+  // Drop everything strictly before AND the title lines themselves, so the
+  // preamble (T&Cs, copyright, etc.) and the title don't appear in the body —
+  // the title is shown separately as a sticky banner in the renderer.
+  const linesAfterTitle =
+    lastTitleLineIdx >= 0 ? allLines.slice(lastTitleLineIdx + 1) : allLines;
+
+  const { speakers, lines: contentLines } = extractSpeakers(linesAfterTitle, verbose);
 
   if (verbose) {
     console.log(`[PdfParser] detected ${speakers.size} speakers:`);
@@ -371,7 +438,7 @@ async function parse(filePath, opts = {}) {
   console.log(
     `[PdfParser] parsed ${attached.length} paragraphs, ${speakers.size} speakers, ${droppedFooters} footers dropped`
   );
-  return attached;
+  return { title, paragraphs: attached };
 }
 
 module.exports = { parse };

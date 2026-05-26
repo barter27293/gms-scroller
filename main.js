@@ -17,8 +17,10 @@ console.log = (...args) => {
   _origConsoleLog.apply(console, args);
 };
 
-const { app, BrowserWindow, ipcMain, dialog, safeStorage } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, safeStorage, session } = require('electron');
 const path = require('path');
+const os = require('os');
+const fs = require('fs');
 const Store = require('electron-store');
 
 const PdfParser = require('./src/PdfParser');
@@ -56,21 +58,97 @@ function sendStatus(message, state) {
   }
 }
 
+async function loadPdfFromPath(filePath) {
+  try {
+    sendStatus('Parsing PDF…', 'idle');
+    const result = await PdfParser.parse(filePath, {
+      verbose: store.get('verboseLogging') === true,
+    });
+    const { title = null, paragraphs } = Array.isArray(result)
+      ? { title: null, paragraphs: result }
+      : result;
+    const texts = paragraphs.map((p) => p.alignText || p.text);
+    if (alignment) alignment.setParagraphs(texts);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('pdf:loaded', { title, paragraphs });
+    }
+    const speakerCount = paragraphs.filter((p) => p.speaker).length;
+    sendStatus(`Loaded ${paragraphs.length} paragraphs (${speakerCount} attributed)`, 'idle');
+    return { ok: true, count: paragraphs.length };
+  } catch (err) {
+    sendStatus(`PDF load failed: ${err.message}`, 'lost');
+    return { ok: false, error: err.message };
+  }
+}
+
+// Hook the audio-site session so PDF downloads land straight in the
+// transcript pane instead of spawning a blank popup + save dialog.
+function attachWebviewDownloadHandler() {
+  const sess = session.fromPartition('persist:audiosession');
+
+  sess.on('will-download', (event, item) => {
+    const url = item.getURL() || '';
+    const mime = item.getMimeType() || '';
+    const isPdf =
+      /\.pdf(\?|$)/i.test(url) ||
+      mime === 'application/pdf' ||
+      /\.pdf$/i.test(item.getFilename() || '');
+
+    if (!isPdf) return; // leave non-PDF downloads to the default flow
+
+    const tmpPath = path.join(os.tmpdir(), `gms-scroller-${Date.now()}.pdf`);
+    item.setSavePath(tmpPath);
+    sendStatus('Downloading transcript PDF…', 'idle');
+
+    item.once('done', async (_evt, state) => {
+      if (state !== 'completed') {
+        sendStatus(`PDF download ${state}`, 'lost');
+        return;
+      }
+      await loadPdfFromPath(tmpPath);
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('tab:activate', 'transcript');
+      }
+      // best-effort cleanup
+      fs.unlink(tmpPath, () => {});
+    });
+  });
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
     backgroundColor: '#1e1e1e',
+    title: 'GMS Scroller',
+    icon: path.join(__dirname, 'build', 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
       webviewTag: true,
+      devTools: !app.isPackaged,
     },
   });
 
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+
+  // F11 toggles OS fullscreen.
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.type === 'keyDown' && input.key === 'F11') {
+      mainWindow.setFullScreen(!mainWindow.isFullScreen());
+      event.preventDefault();
+    }
+  });
+
+  const emitFullScreen = (isFull) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('window:fullscreen-changed', isFull);
+    }
+  };
+  mainWindow.on('enter-full-screen', () => emitFullScreen(true));
+  mainWindow.on('leave-full-screen', () => emitFullScreen(false));
 
   mainWindow.on('closed', () => {
     mainWindow = null;
@@ -254,28 +332,20 @@ function registerIpc() {
     return result.filePaths[0];
   });
 
-  ipcMain.handle('pdf:load', async (_, filePath) => {
-    try {
-      sendStatus('Parsing PDF…', 'idle');
-      const paragraphs = await PdfParser.parse(filePath, {
-        verbose: store.get('verboseLogging') === true,
-      });
-      const texts = paragraphs.map((p) => p.alignText || p.text);
-      if (alignment) alignment.setParagraphs(texts);
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('pdf:loaded', { paragraphs });
-      }
-      const speakerCount = paragraphs.filter((p) => p.speaker).length;
-      sendStatus(`Loaded ${paragraphs.length} paragraphs (${speakerCount} attributed)`, 'idle');
-      return { ok: true, count: paragraphs.length };
-    } catch (err) {
-      sendStatus(`PDF load failed: ${err.message}`, 'lost');
-      return { ok: false, error: err.message };
-    }
-  });
+  ipcMain.handle('pdf:load', async (_, filePath) => loadPdfFromPath(filePath));
 
   ipcMain.on('listen:start', () => startListening());
   ipcMain.on('listen:stop', () => stopListening());
+
+  ipcMain.handle('window:toggle-fullscreen', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return false;
+    mainWindow.setFullScreen(!mainWindow.isFullScreen());
+    return mainWindow.isFullScreen();
+  });
+  ipcMain.handle('window:is-fullscreen', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return false;
+    return mainWindow.isFullScreen();
+  });
   ipcMain.on('align:resync', (_, index) => {
     if (alignment) alignment.resync(index);
   });
@@ -322,10 +392,30 @@ function registerIpc() {
   });
 }
 
+app.setName('GMS Scroller');
+
 app.whenReady().then(() => {
   initPipeline();
   registerIpc();
+  attachWebviewDownloadHandler();
   createWindow();
+
+  // Suppress the blank popup window that the audio site opens when the user
+  // clicks the PDF download link. The session.will-download handler above
+  // still fires for the underlying download request and routes the file into
+  // the transcript pane.
+  app.on('web-contents-created', (_evt, contents) => {
+    if (contents.getType() !== 'webview') return;
+    contents.setWindowOpenHandler(({ url }) => {
+      const isPdf = /\.pdf(\?|$)/i.test(url);
+      if (isPdf) {
+        // Trigger the download in the same partition so will-download fires.
+        contents.downloadURL(url);
+        return { action: 'deny' };
+      }
+      return { action: 'allow' };
+    });
+  });
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

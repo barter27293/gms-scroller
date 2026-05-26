@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; connect-src *;" />
-  <title>TranscriptSync</title>
+  <title>GMS Scroller</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -28,12 +28,17 @@
       <span id="status" data-state="idle">Idle</span>
       <span id="paragraph-count"></span>
 
+      <button id="btn-fullscreen" title="Toggle fullscreen (F11)">⛶ Fullscreen</button>
+      <button id="btn-focus" title="Focus mode (Esc to exit)">Focus</button>
       <button id="btn-settings" title="Settings">Settings</button>
       <button id="btn-theme" title="Toggle light/dark theme">Dark</button>
     </header>
 
+    <button id="btn-focus-exit" type="button" title="Exit focus mode">Exit focus</button>
+
     <main id="content">
       <section id="tab-transcript" class="tab-panel active" role="tabpanel">
+        <header id="transcript-title" hidden></header>
         <div id="scroll-area">
           <div id="transcript-empty" class="placeholder">
             <h2>No transcript loaded</h2>
@@ -104,7 +109,7 @@
           </label>
 
           <label>
-            <span>Baseline drift <em>(px/sec; 0–60)</em></span>
+            <span>Pull-in speed <em>(px/sec at edge of dead zone; 0–60)</em></span>
             <input type="number" id="settings-scroll-baseline" min="0" max="60" step="1" />
           </label>
 
