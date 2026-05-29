@@ -19,7 +19,10 @@ jobs:
           node-version: 20
           cache: npm
 
-      - run: npm ci
+      # --omit=optional skips pdfjs-dist's optional `canvas` native module,
+      # which the app doesn't use (text extraction only) and which fails to
+      # compile on the runner. Mirrors local dev, where canvas is also absent.
+      - run: npm ci --omit=optional
 
       # Regenerate build/icon.ico from build/icon.png.
       - run: npm run build:icon
