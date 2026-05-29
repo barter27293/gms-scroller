@@ -2,11 +2,9 @@ const els = {
   loadBtn: document.getElementById('btn-load-pdf'),
   listenBtn: document.getElementById('btn-listen'),
   stopBtn: document.getElementById('btn-stop'),
-  themeBtn: document.getElementById('btn-theme'),
   settingsBtn: document.getElementById('btn-settings'),
-  focusBtn: document.getElementById('btn-focus'),
-  focusExitBtn: document.getElementById('btn-focus-exit'),
   fullscreenBtn: document.getElementById('btn-fullscreen'),
+  fullscreenExitBtn: document.getElementById('btn-fullscreen-exit'),
   zoomInBtn: document.getElementById('btn-zoom-in'),
   zoomOutBtn: document.getElementById('btn-zoom-out'),
   zoomLevel: document.getElementById('zoom-level'),
@@ -37,6 +35,16 @@ const els = {
   settingsSaveBtn: document.getElementById('settings-save'),
   settingsCancelBtn: document.getElementById('settings-cancel'),
   settingsClearBtn: document.getElementById('settings-clear'),
+
+  updateDialog: document.getElementById('update-dialog'),
+  updateTitle: document.getElementById('update-title'),
+  updateSubtitle: document.getElementById('update-subtitle'),
+  updateNotes: document.getElementById('update-notes'),
+  updateProgressWrap: document.getElementById('update-progress-wrap'),
+  updateProgressFill: document.getElementById('update-progress-fill'),
+  updateProgressLabel: document.getElementById('update-progress-label'),
+  updateLaterBtn: document.getElementById('update-later'),
+  updateActionBtn: document.getElementById('update-action'),
 };
 
 const state = {
@@ -49,8 +57,8 @@ const state = {
 // ---- Scroll controller defaults (overridable per-instance from config) ----
 const SCROLL_GAIN_DEFAULT = 0.35;
 const SCROLL_MAX_V_DEFAULT = 90;
-const SCROLL_BASELINE_V_DEFAULT = 4;
-const SCROLL_DEAD_ZONE = 40; // px from target before we taper to zero velocity
+const SCROLL_BASELINE_V_DEFAULT = 3;
+const SCROLL_DEAD_ZONE = 40; // px from target before we taper toward baseline
 
 // ---- Zoom levels ----
 const ZOOM_LEVELS = [0.75, 0.85, 0.95, 1.0, 1.1, 1.25, 1.4, 1.6, 1.8, 2.0];
@@ -126,17 +134,19 @@ class ScrollController {
       const paneCenter = this.scrollPos + this.pane.clientHeight / 2;
       const error = this.target - paneCenter;
 
-      // Decay-to-stop: velocity reaches 0 as the active paragraph nears the
-      // viewport centre, and stays 0 if we have already passed it. This
-      // prevents the page from drifting forward at baseline after a big
-      // catch-up jump when no new detections are arriving.
+      // Chase the target while ahead; once caught up, drift gently forward
+      // at baselineVelocity so the page never sits frozen between matches.
+      // Reaching the document end is handled by the scrollPos clamp below.
       let velocity;
-      if (error <= 0) {
-        velocity = 0;
-      } else if (error < SCROLL_DEAD_ZONE) {
-        velocity = this.baselineVelocity * (error / SCROLL_DEAD_ZONE);
-      } else {
+      if (error > SCROLL_DEAD_ZONE) {
         velocity = Math.min(this.maxVelocity, error * this.gain);
+      } else if (error > 0) {
+        // Blend between baseline (at error→0) and the chase rate (at edge of dead zone).
+        const chase = Math.min(this.maxVelocity, error * this.gain);
+        const t = error / SCROLL_DEAD_ZONE;
+        velocity = this.baselineVelocity + t * (chase - this.baselineVelocity);
+      } else {
+        velocity = this.baselineVelocity;
       }
 
       if (velocity > 0) {
@@ -251,7 +261,6 @@ async function init() {
     els.webview.src = cfg.audioSiteUrl;
   }
 
-  initTheme();
   initZoom();
   initTabs();
 
@@ -265,25 +274,18 @@ async function init() {
   els.loadBtn.addEventListener('click', onLoadPdf);
   els.listenBtn.addEventListener('click', onListen);
   els.stopBtn.addEventListener('click', onStop);
-  els.themeBtn.addEventListener('click', toggleTheme);
   els.settingsBtn.addEventListener('click', openSettings);
-  els.focusBtn.addEventListener('click', toggleFocusMode);
-  els.focusExitBtn.addEventListener('click', () => setFocusMode(false));
   els.fullscreenBtn.addEventListener('click', () => window.api.toggleFullScreen());
-  window.api.onFullScreenChanged((isFull) => updateFullScreenButton(isFull));
-  window.api.isFullScreen().then(updateFullScreenButton).catch(() => {});
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && document.body.classList.contains('focus-mode')) {
-      setFocusMode(false);
-    }
-  });
-  initFocusMode();
+  els.fullscreenExitBtn.addEventListener('click', () => window.api.toggleFullScreen());
+  window.api.onFullScreenChanged((isFull) => updateFullScreenUI(isFull));
+  window.api.isFullScreen().then(updateFullScreenUI).catch(() => {});
   els.zoomInBtn.addEventListener('click', () => stepZoom(+1));
   els.zoomOutBtn.addEventListener('click', () => stepZoom(-1));
 
   initSettingsDialog();
   initAutoLogin();
   initCopyBlock();
+  initUpdateDialog();
 
   const onUserScroll = () => scrollController.pauseForUserScroll();
   els.scrollArea.addEventListener('wheel', onUserScroll, { passive: true });
@@ -316,6 +318,10 @@ function onListen() {
   els.listenBtn.disabled = true;
   els.stopBtn.disabled = false;
   if (scrollController) scrollController.resume();
+  if (state.audioWasPaused) {
+    resumeWebviewMedia();
+    state.audioWasPaused = false;
+  }
 }
 
 function onStop() {
@@ -324,6 +330,42 @@ function onStop() {
   els.listenBtn.disabled = false;
   els.stopBtn.disabled = true;
   if (scrollController) scrollController.pauseIndefinitely();
+  pauseWebviewMedia().then((wasPlaying) => {
+    state.audioWasPaused = wasPlaying;
+  });
+}
+
+// Pause the first playing <audio>/<video> in the embedded site and tag it so
+// we can resume it later. Returns true if something was paused.
+async function pauseWebviewMedia() {
+  if (!els.webview) return false;
+  const code = `
+    (function () {
+      const m = Array.from(document.querySelectorAll('audio, video'))
+        .find((el) => !el.paused && !el.ended);
+      if (!m) return false;
+      m.setAttribute('data-gms-paused', '1');
+      try { m.pause(); } catch (_) {}
+      return true;
+    })();
+  `;
+  try { return await els.webview.executeJavaScript(code); }
+  catch (_) { return false; }
+}
+
+async function resumeWebviewMedia() {
+  if (!els.webview) return;
+  const code = `
+    (function () {
+      const m = document.querySelector('audio[data-gms-paused="1"], video[data-gms-paused="1"]');
+      if (!m) return false;
+      m.removeAttribute('data-gms-paused');
+      try { const p = m.play(); if (p && typeof p.catch === 'function') p.catch(() => {}); } catch (_) {}
+      return true;
+    })();
+  `;
+  try { await els.webview.executeJavaScript(code); }
+  catch (_) { /* ignore */ }
 }
 
 function renderParagraphs(paragraphs, title) {
@@ -334,6 +376,8 @@ function renderParagraphs(paragraphs, title) {
     els.transcriptTitle.textContent = '';
     els.transcriptTitle.hidden = true;
   }
+  const hasSpeakers = paragraphs.some((p) => p && p.speaker);
+  document.body.classList.toggle('has-speakers', hasSpeakers);
   els.transcript.innerHTML = '';
   state.paragraphNodes = paragraphs.map((para, i) => {
     const p = document.createElement('p');
@@ -400,25 +444,6 @@ function updateStatus(message, s) {
 }
 
 // ============================================================
-// Theme
-// ============================================================
-
-function applyTheme(theme) {
-  document.documentElement.dataset.theme = theme;
-  els.themeBtn.textContent = theme === 'light' ? 'Dark' : 'Light';
-}
-function initTheme() {
-  const saved = localStorage.getItem('theme') || 'light';
-  applyTheme(saved);
-}
-function toggleTheme() {
-  const current = document.documentElement.dataset.theme || 'light';
-  const next = current === 'light' ? 'dark' : 'light';
-  applyTheme(next);
-  localStorage.setItem('theme', next);
-}
-
-// ============================================================
 // Zoom
 // ============================================================
 
@@ -472,23 +497,14 @@ function initCopyBlock() {
 }
 
 // ============================================================
-// Focus mode
+// Fullscreen
 // ============================================================
 
-function setFocusMode(on) {
-  document.body.classList.toggle('focus-mode', on);
-  localStorage.setItem('focusMode', on ? '1' : '0');
-}
-function toggleFocusMode() {
-  setFocusMode(!document.body.classList.contains('focus-mode'));
-}
-function initFocusMode() {
-  if (localStorage.getItem('focusMode') === '1') setFocusMode(true);
-}
-
-function updateFullScreenButton(isFull) {
-  if (!els.fullscreenBtn) return;
-  els.fullscreenBtn.textContent = isFull ? '⛶ Exit fullscreen' : '⛶ Fullscreen';
+function updateFullScreenUI(isFull) {
+  document.body.classList.toggle('fullscreen', !!isFull);
+  if (els.fullscreenBtn) {
+    els.fullscreenBtn.textContent = isFull ? '⛶ Exit fullscreen' : '⛶ Fullscreen';
+  }
 }
 
 // ============================================================
@@ -615,7 +631,54 @@ async function onClearSettings() {
 function initAutoLogin() {
   els.webview.addEventListener('did-finish-load', () => {
     setTimeout(tryAutoFill, 400);
+    setTimeout(tryRelabelDownloadLinks, 600);
   });
+  els.webview.addEventListener('did-navigate-in-page', () => {
+    setTimeout(tryRelabelDownloadLinks, 200);
+  });
+}
+
+// Rewrite any "Download" text on links/buttons in the audio site to
+// "Load Transcript". Idempotent via a data-gms-relabelled marker so SPA
+// re-renders don't loop. The underlying href / click behaviour is unchanged
+// — clicking still triggers the download intercept in main.js.
+async function tryRelabelDownloadLinks() {
+  if (!els.webview) return;
+  const code = `
+    (function () {
+      const TARGETS = /^\\s*(download(\\s+pdf)?)\\s*$/i;
+      const REPLACEMENT = 'Load Transcript';
+      const nodes = document.querySelectorAll('a, button, span, div');
+      let count = 0;
+      for (const el of nodes) {
+        if (el.getAttribute('data-gms-relabelled') === '1') continue;
+        // Only relabel leaf-ish elements whose own text matches.
+        const txt = (el.textContent || '').trim();
+        if (!TARGETS.test(txt)) continue;
+        // Avoid clobbering elements that contain other interactive children.
+        if (el.querySelector('a, button, input, select, textarea')) continue;
+        // Replace only direct text nodes; leave inner elements alone.
+        let replaced = false;
+        for (const child of Array.from(el.childNodes)) {
+          if (child.nodeType === 3 && TARGETS.test(child.textContent.trim())) {
+            child.textContent = REPLACEMENT;
+            replaced = true;
+          }
+        }
+        if (!replaced && TARGETS.test(txt)) {
+          el.textContent = REPLACEMENT;
+          replaced = true;
+        }
+        if (replaced) {
+          el.setAttribute('data-gms-relabelled', '1');
+          count++;
+        }
+      }
+      return count;
+    })();
+  `;
+  try { await els.webview.executeJavaScript(code); }
+  catch (_) { /* ignore */ }
 }
 
 async function tryAutoFill() {
@@ -688,6 +751,69 @@ async function tryAutoFill() {
   } catch (err) {
     console.warn('[AutoLogin] inject failed:', err && err.message);
   }
+}
+
+// ===== Auto-update modal =====
+
+// Release notes arrive from the GitHub release body — a string, or (rarely) an
+// array of { version, note }. Render as plain text to avoid injecting markup.
+function formatReleaseNotes(notes) {
+  if (!notes) return 'No release notes provided.';
+  if (Array.isArray(notes)) {
+    return notes.map((n) => (typeof n === 'string' ? n : n.note || '')).join('\n\n');
+  }
+  // GitHub bodies can contain HTML tags; strip them for a clean text view.
+  return String(notes).replace(/<[^>]+>/g, '').trim() || 'No release notes provided.';
+}
+
+function initUpdateDialog() {
+  let downloaded = false;
+
+  els.updateLaterBtn.addEventListener('click', () => els.updateDialog.close());
+
+  els.updateActionBtn.addEventListener('click', async () => {
+    if (downloaded) {
+      await window.api.installUpdate();
+      return;
+    }
+    // Start download — swap the button for a progress bar.
+    els.updateActionBtn.disabled = true;
+    els.updateActionBtn.textContent = 'Downloading…';
+    els.updateProgressWrap.hidden = false;
+    try {
+      await window.api.downloadUpdate();
+    } catch (err) {
+      els.updateActionBtn.disabled = false;
+      els.updateActionBtn.textContent = 'Download & Install';
+      els.updateProgressLabel.textContent = `Download failed: ${err && err.message ? err.message : err}`;
+    }
+  });
+
+  window.api.onUpdateAvailable((p) => {
+    downloaded = false;
+    els.updateTitle.textContent = `Update available — v${p.version}`;
+    els.updateSubtitle.textContent = 'A new version of GMS Scroller is ready to install.';
+    els.updateNotes.textContent = formatReleaseNotes(p.releaseNotes);
+    els.updateProgressWrap.hidden = true;
+    els.updateProgressFill.style.width = '0%';
+    els.updateActionBtn.disabled = false;
+    els.updateActionBtn.textContent = 'Download & Install';
+    if (!els.updateDialog.open) els.updateDialog.showModal();
+  });
+
+  window.api.onUpdateProgress((p) => {
+    const pct = Math.max(0, Math.min(100, Math.round(p.percent || 0)));
+    els.updateProgressFill.style.width = `${pct}%`;
+    els.updateProgressLabel.textContent = `Downloading… ${pct}%`;
+  });
+
+  window.api.onUpdateDownloaded(() => {
+    downloaded = true;
+    els.updateProgressFill.style.width = '100%';
+    els.updateProgressLabel.textContent = 'Download complete.';
+    els.updateActionBtn.disabled = false;
+    els.updateActionBtn.textContent = 'Restart & Install';
+  });
 }
 
 init();

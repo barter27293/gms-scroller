@@ -56,7 +56,49 @@ npm start
 npm run build
 ```
 
-Output lands in `dist/`.
+Output lands in `dist/`. The NSIS installer bundles the **Screen Capturer
+Recorder** audio driver (see [Releases](#releases-auto-update) below) and runs
+it automatically on a fresh install.
+
+> Before building, drop the driver installer into
+> `vendor/setup-screen-capturer-recorder.exe` — see [`vendor/README.md`](vendor/README.md).
+> The build fails without it.
+
+---
+
+## Releases & auto-update
+
+Releases are published to GitHub and the app checks for updates on every launch.
+
+### Cutting a release
+
+1. Bump `version` in `package.json` (e.g. `0.3.0`).
+2. Move the `[Unreleased]` notes in `CHANGELOG.md` under a new version heading.
+3. Commit, then tag and push:
+   ```powershell
+   git tag v0.3.0
+   git push origin v0.3.0
+   ```
+4. The **Release** GitHub Action builds the Windows installer and creates a
+   **draft** GitHub release with the `.exe` + `latest.yml`.
+5. On GitHub, paste the changelog into the release body and **Publish** it.
+6. Installed clients show an in-app "Update available" prompt (with the release
+   body as the changelog) on their next launch.
+
+You can also publish from your own machine instead of CI:
+```powershell
+$env:GH_TOKEN = "<a github token with repo scope>"
+npm run release
+```
+
+### How auto-update works
+
+- `src/Updater.js` wires up `electron-updater` against the GitHub repo.
+- It only runs in **packaged builds** (not `npm start`).
+- The update modal lets the user Download & Install now, or pick **Later** (the
+  update then installs automatically on next quit).
+- Builds are **unsigned**, so Windows SmartScreen warns on first install/update.
+  Updates still work. The repo must stay **public** for token-free update checks.
 
 ---
 

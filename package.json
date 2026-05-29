@@ -6,14 +6,20 @@
   "private": true,
   "author": "Kieran Barter",
   "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/barter27293/gms-scroller.git"
+  },
   "scripts": {
     "start": "electron .",
     "build": "electron-builder --win",
+    "release": "electron-builder --win --publish always",
     "build:icon": "node scripts/make-icon.js",
     "build:icon:placeholder": "node scripts/make-icon.js --generate"
   },
   "dependencies": {
     "electron-store": "^8.2.0",
+    "electron-updater": "^6.8.3",
     "fuse.js": "^7.0.0",
     "pdfjs-dist": "^3.11.174"
   },
@@ -26,9 +32,22 @@
   "build": {
     "appId": "com.kieran.gmsscroller",
     "productName": "GMS Scroller",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "barter27293",
+        "repo": "gms-scroller",
+        "releaseType": "draft"
+      }
+    ],
     "win": {
       "target": "nsis",
       "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "include": "build/installer.nsh"
     },
     "files": [
       "main.js",
@@ -43,6 +62,10 @@
       {
         "from": "python",
         "to": "python"
+      },
+      {
+        "from": "vendor/setup-screen-capturer-recorder.exe",
+        "to": "setup-screen-capturer-recorder.exe"
       }
     ]
   }

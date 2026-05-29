@@ -17,7 +17,7 @@ console.log = (...args) => {
   _origConsoleLog.apply(console, args);
 };
 
-const { app, BrowserWindow, ipcMain, dialog, safeStorage, session } = require('electron');
+const { app, BrowserWindow, Menu, ipcMain, dialog, safeStorage, session } = require('electron');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
@@ -27,6 +27,7 @@ const PdfParser = require('./src/PdfParser');
 const { AudioCapture } = require('./src/AudioCapture');
 const { WhisperBridge } = require('./src/WhisperBridge');
 const { AlignmentEngine } = require('./src/AlignmentEngine');
+const { initAutoUpdater, downloadUpdate, quitAndInstall } = require('./src/Updater');
 
 const DEFAULTS = {
   audioSiteUrl: 'https://globalmediastream.com/',
@@ -390,9 +391,18 @@ function registerIpc() {
     store.delete('audioCredentials');
     return { ok: true };
   });
+
+  // Auto-update: renderer drives download/install from the update modal.
+  ipcMain.handle('update:download', () => downloadUpdate());
+  ipcMain.handle('update:install', () => quitAndInstall());
 }
 
 app.setName('GMS Scroller');
+
+// Remove the default Electron menu (also kills the View > Toggle DevTools
+// shortcut). DevTools still works via F12 in dev where webPreferences.devTools
+// is true; in the packaged build it's disabled entirely.
+Menu.setApplicationMenu(null);
 
 app.whenReady().then(() => {
   initPipeline();
@@ -400,20 +410,23 @@ app.whenReady().then(() => {
   attachWebviewDownloadHandler();
   createWindow();
 
-  // Suppress the blank popup window that the audio site opens when the user
-  // clicks the PDF download link. The session.will-download handler above
-  // still fires for the underlying download request and routes the file into
-  // the transcript pane.
+  // Check GitHub for a newer release on every launch (packaged builds only —
+  // autoUpdater has no update feed in `npm start`).
+  if (app.isPackaged) initAutoUpdater(() => mainWindow);
+
+  // Suppress every popup window the audio site tries to open and route the
+  // underlying request through downloadURL. session.will-download then decides
+  // whether it's a PDF (load into transcript) or something else (ignored).
+  // The site's download link often redirects via a script URL that does NOT
+  // end in .pdf, so we can't filter here on extension alone.
   app.on('web-contents-created', (_evt, contents) => {
     if (contents.getType() !== 'webview') return;
     contents.setWindowOpenHandler(({ url }) => {
-      const isPdf = /\.pdf(\?|$)/i.test(url);
-      if (isPdf) {
-        // Trigger the download in the same partition so will-download fires.
-        contents.downloadURL(url);
-        return { action: 'deny' };
+      console.log(`[Popup] denied + downloadURL: ${url}`);
+      try { contents.downloadURL(url); } catch (err) {
+        console.warn('[Popup] downloadURL failed:', err.message);
       }
-      return { action: 'allow' };
+      return { action: 'deny' };
     });
   });
 

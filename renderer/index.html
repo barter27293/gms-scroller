@@ -29,12 +29,10 @@
       <span id="paragraph-count"></span>
 
       <button id="btn-fullscreen" title="Toggle fullscreen (F11)">⛶ Fullscreen</button>
-      <button id="btn-focus" title="Focus mode (Esc to exit)">Focus</button>
       <button id="btn-settings" title="Settings">Settings</button>
-      <button id="btn-theme" title="Toggle light/dark theme">Dark</button>
     </header>
 
-    <button id="btn-focus-exit" type="button" title="Exit focus mode">Exit focus</button>
+    <button id="btn-fullscreen-exit" type="button" title="Exit fullscreen (Esc)">⛶ Exit fullscreen</button>
 
     <main id="content">
       <section id="tab-transcript" class="tab-panel active" role="tabpanel">
@@ -109,7 +107,7 @@
           </label>
 
           <label>
-            <span>Pull-in speed <em>(px/sec at edge of dead zone; 0–60)</em></span>
+            <span>Reading drift <em>(px/sec when caught up; 0–60)</em></span>
             <input type="number" id="settings-scroll-baseline" min="0" max="60" step="1" />
           </label>
 
@@ -134,6 +132,27 @@
           <button type="button" id="settings-save" class="primary">Save</button>
         </div>
       </form>
+    </dialog>
+
+    <dialog id="update-dialog">
+      <h2 id="update-title">Update available</h2>
+      <p class="hint" id="update-subtitle">A new version of GMS Scroller is ready to install.</p>
+
+      <fieldset>
+        <legend>What's new</legend>
+        <div id="update-notes" class="update-notes">No release notes provided.</div>
+      </fieldset>
+
+      <div id="update-progress-wrap" class="update-progress-wrap" hidden>
+        <div class="progress-bar"><div id="update-progress-fill" class="progress-bar-fill"></div></div>
+        <span id="update-progress-label" class="hint">Downloading… 0%</span>
+      </div>
+
+      <div class="dialog-actions">
+        <span style="flex: 1;"></span>
+        <button type="button" id="update-later">Later</button>
+        <button type="button" id="update-action" class="primary">Download &amp; Install</button>
+      </div>
     </dialog>
   </div>
 
