@@ -1,0 +1,32 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write # allow electron-builder to create the GitHub release
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # Regenerate build/icon.ico from build/icon.png.
+      - run: npm run build:icon
+
+      # Build the NSIS installer and publish it (+ latest.yml) to a draft
+      # GitHub release. Edit the release notes on GitHub, then publish it so
+      # clients pick up the update.
+      - run: npx electron-builder --win --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

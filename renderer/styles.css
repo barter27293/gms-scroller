@@ -1,42 +1,5 @@
 :root {
-  /* Light theme — app chrome */
-  --bg: #ffffff;
-  --bg-elev: #f6f8fa;
-  --fg: #1a1a1a;
-  --fg-muted: #57606a;
-  --accent: #0969da;
-  --border: #d0d7de;
-  --button-bg: #ffffff;
-  --button-bg-hover: #f3f4f6;
-  --button-border: #d0d7de;
-  --paragraph-hover-bg: rgba(0, 0, 0, 0.04);
-  --highlight: #fff3cd;
-  --highlight-fg: #1e1e1e;
-  --speaker-active-fg: rgba(0, 0, 0, 0.6);
-  --status-idle: #57606a;
-  --status-listening: #0969da;
-  --status-synced: #1a7f37;
-  --status-lost: #d29922;
-
-  /* Document layout */
-  --area-bg: #7d7d7d;          /* ~50% grey background around the page */
-  --page-bg: #ffffff;          /* white page */
-  --page-fg: #1a1a1a;
-  --page-width: 75%;
-  --page-max-width: 1100px;
-  --page-padding-y: 56px;
-  --page-padding-x: 80px;
-  --sidenote-width: 160px;
-  --sidenote-gap: 28px;
-  --sidenote-reserve: calc(var(--sidenote-width) + var(--sidenote-gap) + 24px);
-  --sidenote-fg: rgba(255, 255, 255, 0.92);
-  --sidenote-fg-muted: rgba(255, 255, 255, 0.65);
-
-  /* Zoom (text size multiplier) */
-  --zoom: 1;
-}
-
-[data-theme="dark"] {
+  /* App chrome (dark — the only theme) */
   --bg: #1e1e1e;
   --bg-elev: #252526;
   --fg: #e6e6e6;
@@ -55,11 +18,22 @@
   --status-synced: #4caf50;
   --status-lost: #f6a609;
 
-  --area-bg: #161616;
-  --page-bg: #f7f7f5;          /* page stays bright in dark mode for readable text */
+  /* Document layout */
+  --area-bg: #161616;           /* near-black gutter around the page */
+  --page-bg: #f7f7f5;           /* page stays bright cream for legible text */
   --page-fg: #1a1a1a;
+  --page-width: 75%;
+  --page-max-width: 1100px;
+  --page-padding-y: 56px;
+  --page-padding-x: 80px;
+  --sidenote-width: 160px;
+  --sidenote-gap: 28px;
+  --sidenote-reserve: calc(var(--sidenote-width) + var(--sidenote-gap) + 24px);
   --sidenote-fg: rgba(255, 255, 255, 0.85);
   --sidenote-fg-muted: rgba(255, 255, 255, 0.55);
+
+  /* Zoom (text size multiplier) */
+  --zoom: 1;
 }
 
 * { box-sizing: border-box; }
@@ -217,23 +191,37 @@ html, body {
   overflow-y: auto;
   background: var(--area-bg);
   padding: 32px 0 50vh 0;
+  /* Thin overlay scrollbar — present always but unobtrusive. */
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.25) transparent;
 }
+#scroll-area::-webkit-scrollbar { width: 8px; height: 8px; }
+#scroll-area::-webkit-scrollbar-track { background: transparent; }
+#scroll-area::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.25);
+  border-radius: 4px;
+}
+#scroll-area::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.45); }
 
 #document-page {
   background: var(--page-bg);
   color: var(--page-fg);
   width: var(--page-width);
   max-width: var(--page-max-width);
-  /* Off-centre to the left so the sidenote column on the right always fits.
-     Margin-left centres the page within the available width minus the sidenote
-     reserve; margin-right keeps that gutter present. Falls back to 32px min. */
-  margin-left: max(32px, calc((100% - min(var(--page-max-width), var(--page-width)) - var(--sidenote-reserve)) / 2));
-  margin-right: var(--sidenote-reserve);
+  /* Default: fully centred (no speaker sidenotes detected → no reserved gutter). */
+  margin: 0 auto;
   padding: var(--page-padding-y) var(--page-padding-x);
   box-shadow: 0 6px 28px rgba(0, 0, 0, 0.35);
   border-radius: 3px;
   font-size: calc(16px * var(--zoom));
   line-height: 1.7;
+}
+
+/* When speakers are present, shift the page left so the sidenote column on the
+   right always fits. */
+body.has-speakers #document-page {
+  margin-left: max(32px, calc((100% - min(var(--page-max-width), var(--page-width)) - var(--sidenote-reserve)) / 2));
+  margin-right: var(--sidenote-reserve);
 }
 
 #document-page #transcript {
@@ -290,9 +278,9 @@ html, body {
 .placeholder h2 { font-weight: 500; margin: 0 0 8px; }
 .placeholder p  { margin: 0; }
 
-/* ===== Focus mode ===== */
+/* ===== Fullscreen exit pill ===== */
 
-#btn-focus-exit {
+#btn-fullscreen-exit {
   position: fixed;
   top: 12px;
   right: 12px;
@@ -306,11 +294,10 @@ html, body {
   font-size: 12px;
   cursor: pointer;
 }
-#btn-focus-exit:hover { background: rgba(0, 0, 0, 0.75); }
+#btn-fullscreen-exit:hover { background: rgba(0, 0, 0, 0.75); }
 
-body.focus-mode #toolbar { display: none; }
-body.focus-mode #btn-focus-exit { display: inline-block; }
-body.focus-mode #content { /* fill the viewport now that the toolbar is gone */ }
+body.fullscreen #toolbar { display: none; }
+body.fullscreen #btn-fullscreen-exit { display: inline-block; }
 
 /* ===== Browser tab ===== */
 
@@ -428,4 +415,112 @@ dialog#settings-dialog .dialog-actions button.primary {
   border-color: var(--accent);
   color: #fff;
   font-weight: 500;
+}
+
+/* ===== Update dialog ===== */
+
+dialog#update-dialog {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  color: var(--fg);
+  padding: 24px;
+  min-width: 480px;
+  max-width: 600px;
+  max-height: 85vh;
+  overflow-y: auto;
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.4);
+}
+dialog#update-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.55);
+}
+dialog#update-dialog h2 {
+  margin: 0 0 6px;
+  font-size: 18px;
+  font-weight: 600;
+}
+dialog#update-dialog .hint {
+  margin: 0 0 14px;
+  font-size: 12px;
+  color: var(--fg-muted);
+  line-height: 1.5;
+}
+dialog#update-dialog fieldset {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 16px;
+  margin: 0 0 16px;
+}
+dialog#update-dialog legend {
+  padding: 0 6px;
+  font-size: 13px;
+  color: var(--fg-muted);
+  font-weight: 500;
+}
+dialog#update-dialog .update-notes {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--fg);
+  max-height: 320px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+dialog#update-dialog .update-notes h1,
+dialog#update-dialog .update-notes h2,
+dialog#update-dialog .update-notes h3 {
+  font-size: 14px;
+  margin: 12px 0 6px;
+}
+dialog#update-dialog .update-notes ul {
+  margin: 6px 0;
+  padding-left: 20px;
+}
+dialog#update-dialog .update-notes a {
+  color: var(--accent);
+}
+dialog#update-dialog .update-progress-wrap {
+  margin: 0 0 16px;
+}
+dialog#update-dialog .progress-bar {
+  width: 100%;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  margin-bottom: 6px;
+}
+dialog#update-dialog .progress-bar-fill {
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  transition: width 0.15s linear;
+}
+dialog#update-dialog .dialog-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+dialog#update-dialog .dialog-actions button {
+  padding: 6px 16px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--button-bg);
+  color: var(--fg);
+  font-size: 13px;
+  cursor: pointer;
+}
+dialog#update-dialog .dialog-actions button:hover {
+  background: var(--button-bg-hover);
+}
+dialog#update-dialog .dialog-actions button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 500;
+}
+dialog#update-dialog .dialog-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
 }

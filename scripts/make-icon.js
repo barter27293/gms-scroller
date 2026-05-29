@@ -119,6 +119,36 @@ async function writePlaceholderPng() {
   console.log(`Wrote placeholder ${PNG_PATH}`);
 }
 
+// Bilinear downscale of a pngjs image to a square of `size` px.
+function resizePng(src, size) {
+  const out = new PNG({ width: size, height: size, colorType: 6 });
+  const sx = src.width / size;
+  const sy = src.height / size;
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const fx = (x + 0.5) * sx - 0.5;
+      const fy = (y + 0.5) * sy - 0.5;
+      const x0 = Math.max(0, Math.floor(fx));
+      const y0 = Math.max(0, Math.floor(fy));
+      const x1 = Math.min(src.width - 1, x0 + 1);
+      const y1 = Math.min(src.height - 1, y0 + 1);
+      const dx = fx - x0;
+      const dy = fy - y0;
+      const di = (size * y + x) << 2;
+      for (let c = 0; c < 4; c++) {
+        const p00 = src.data[((src.width * y0 + x0) << 2) + c];
+        const p10 = src.data[((src.width * y0 + x1) << 2) + c];
+        const p01 = src.data[((src.width * y1 + x0) << 2) + c];
+        const p11 = src.data[((src.width * y1 + x1) << 2) + c];
+        const top = p00 + (p10 - p00) * dx;
+        const bot = p01 + (p11 - p01) * dx;
+        out.data[di + c] = Math.round(top + (bot - top) * dy);
+      }
+    }
+  }
+  return out;
+}
+
 async function convertPngToIco() {
   if (!fs.existsSync(PNG_PATH)) {
     throw new Error(
@@ -126,9 +156,20 @@ async function convertPngToIco() {
       ` 'npm run build:icon:placeholder' to regenerate the default.`
     );
   }
-  const icoBuf = await pngToIco([PNG_PATH]);
+  // ICO entries cannot exceed 256px (the format stores width/height in one byte),
+  // and NSIS rejects oversized icons. Downscale the source to standard sizes.
+  const src = PNG.sync.read(fs.readFileSync(PNG_PATH));
+  const maxSize = Math.min(256, src.width, src.height);
+  const sizes = [256, 128, 64, 48, 32, 16].filter((s) => s <= maxSize);
+  if (sizes.length === 0) sizes.push(maxSize);
+  const pngBuffers = sizes.map((s) =>
+    s === src.width && s === src.height
+      ? PNG.sync.write(src)
+      : PNG.sync.write(resizePng(src, s))
+  );
+  const icoBuf = await pngToIco(pngBuffers);
   fs.writeFileSync(ICO_PATH, icoBuf);
-  console.log(`Wrote ${ICO_PATH}`);
+  console.log(`Wrote ${ICO_PATH} (sizes: ${sizes.join(', ')})`);
 }
 
 async function main() {

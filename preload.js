@@ -23,4 +23,10 @@ contextBridge.exposeInMainWorld('api', {
   toggleFullScreen: () => ipcRenderer.invoke('window:toggle-fullscreen'),
   isFullScreen: () => ipcRenderer.invoke('window:is-fullscreen'),
   onFullScreenChanged: (cb) => ipcRenderer.on('window:fullscreen-changed', (_, isFull) => cb(isFull)),
+
+  onUpdateAvailable: (cb) => ipcRenderer.on('update:available', (_, p) => cb(p)),
+  onUpdateProgress: (cb) => ipcRenderer.on('update:progress', (_, p) => cb(p)),
+  onUpdateDownloaded: (cb) => ipcRenderer.on('update:downloaded', (_, p) => cb(p)),
+  downloadUpdate: () => ipcRenderer.invoke('update:download'),
+  installUpdate: () => ipcRenderer.invoke('update:install'),
 });
