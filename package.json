@@ -1,7 +1,7 @@
 {
   "name": "gms-scroller",
-  "version": "0.2.0",
-  "description": "Electron desktop app that embeds the GMS audio website and auto-scrolls a PDF transcript using real-time speech-to-text.",
+  "version": "0.3.0",
+  "description": "Desktop app that embeds the GMS audio website and auto-scrolls a PDF transcript using real-time speech-to-text.",
   "main": "main.js",
   "private": true,
   "author": "Kieran Barter",

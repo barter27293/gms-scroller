@@ -4,7 +4,7 @@ All notable changes to GMS Scroller. Paste the relevant section into the GitHub
 release body when publishing — that text is shown to users in the in-app update
 prompt.
 
-## [Unreleased]
+## [0.3.0] - 2026-05-29
 
 ### Added
 - Automatic update check on startup, with an in-app prompt showing the changelog
