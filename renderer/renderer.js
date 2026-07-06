@@ -14,6 +14,7 @@ const els = {
     browser: document.getElementById('tab-browser'),
   },
   status: document.getElementById('status'),
+  matchInfo: document.getElementById('match-info'),
   paragraphCount: document.getElementById('paragraph-count'),
   transcript: document.getElementById('transcript'),
   transcriptTitle: document.getElementById('transcript-title'),
@@ -26,6 +27,8 @@ const els = {
   settingsUsername: document.getElementById('settings-username'),
   settingsPassword: document.getElementById('settings-password'),
   settingsAutosubmit: document.getElementById('settings-autosubmit'),
+  settingsWhisperModel: document.getElementById('settings-whisper-model'),
+  settingsShowMatch: document.getElementById('settings-show-match'),
   settingsFuseThreshold: document.getElementById('settings-fuse-threshold'),
   settingsParagraphsPerSec: document.getElementById('settings-paragraphs-per-sec'),
   settingsScrollGain: document.getElementById('settings-scroll-gain'),
@@ -35,6 +38,20 @@ const els = {
   settingsSaveBtn: document.getElementById('settings-save'),
   settingsCancelBtn: document.getElementById('settings-cancel'),
   settingsClearBtn: document.getElementById('settings-clear'),
+
+  diagBtn: document.getElementById('btn-diagnostics'),
+  diagPanel: document.getElementById('diag-panel'),
+  diagClose: document.getElementById('diag-close'),
+  diagAudioDevice: document.getElementById('diag-audio-device'),
+  diagFfmpeg: document.getElementById('diag-ffmpeg'),
+  diagPython: document.getElementById('diag-python'),
+  diagWhisper: document.getElementById('diag-whisper'),
+  diagChunks: document.getElementById('diag-chunks'),
+  diagTranscriptions: document.getElementById('diag-transcriptions'),
+  diagLastText: document.getElementById('diag-last-text'),
+  diagLastMatch: document.getElementById('diag-last-match'),
+  diagLogPath: document.getElementById('diag-log-path'),
+  diagLog: document.getElementById('diag-log'),
 
   updateDialog: document.getElementById('update-dialog'),
   updateTitle: document.getElementById('update-title'),
@@ -49,6 +66,14 @@ const els = {
 
 const state = {
   paragraphNodes: [],
+  sentenceNodes: [], // [para][sent] -> span element
+  sentMeta: [], // [para][sent] -> { start, end } char offsets in body textContent
+  sentToUnit: [], // [para][sent] -> alignment unit index
+  units: [], // [{ para, sentStart, sentEnd }]
+  activeUnit: -1,
+  windowUnits: [], // unit indices currently marked .in-window
+  lastMatchRange: null, // DOM Range of the last matched word run
+  showMatchDetails: true,
   autoScrollResumeDelay: 3000,
   isListening: false,
   activeTab: 'transcript',
@@ -219,32 +244,56 @@ function createRange(rootEl, charStart, charEnd) {
   } catch (_) { return null; }
 }
 
-function computeTargetY(paragraphNode, sttText) {
+// Scroll target for an alignment unit (a sentence range within a paragraph).
+// When sttText is given, refine to the longest matching word run inside the
+// unit — the resulting Range doubles as the "last matched" visual highlight.
+function computeTargetYForUnit(para, sentStart, sentEnd, sttText) {
+  const paragraphNode = state.paragraphNodes[para];
+  if (!paragraphNode) return NaN;
   const paneRect = els.scrollArea.getBoundingClientRect();
   const scrollTop = els.scrollArea.scrollTop;
-
   const bodyEl = paragraphNode.querySelector('.body');
-  const targetEl = bodyEl || paragraphNode;
+  const meta = state.sentMeta[para];
 
-  if (sttText) {
-    const run = findLongestWordRun(targetEl.textContent, sttText);
-    if (run) {
-      const charRange = wordRangeToCharRange(targetEl.textContent, run.wordStart, run.wordLen);
-      if (charRange) {
-        const r = createRange(targetEl, charRange.charStart, charRange.charEnd);
-        if (r) {
-          const rect = r.getBoundingClientRect();
-          if (rect.height > 0) {
-            return rect.top - paneRect.top + scrollTop + rect.height / 2;
+  if (bodyEl && meta && meta[sentStart]) {
+    const unitStart = meta[sentStart].start;
+    const endMeta = meta[Math.min(sentEnd, meta.length - 1)] || meta[sentStart];
+    const unitEnd = endMeta.end;
+
+    if (sttText) {
+      const unitText = bodyEl.textContent.slice(unitStart, unitEnd);
+      const run = findLongestWordRun(unitText, sttText);
+      if (run) {
+        const charRange = wordRangeToCharRange(unitText, run.wordStart, run.wordLen);
+        if (charRange) {
+          const r = createRange(
+            bodyEl,
+            unitStart + charRange.charStart,
+            unitStart + charRange.charEnd
+          );
+          if (r) {
+            state.lastMatchRange = r;
+            updateMatchHighlight();
+            const rect = r.getBoundingClientRect();
+            if (rect.height > 0) {
+              return rect.top - paneRect.top + scrollTop + rect.height / 2;
+            }
           }
         }
+      }
+    }
+
+    const span = (state.sentenceNodes[para] || [])[sentStart];
+    if (span) {
+      const rect = span.getBoundingClientRect();
+      if (rect.height > 0) {
+        return rect.top - paneRect.top + scrollTop + rect.height / 2;
       }
     }
   }
 
   const pRect = paragraphNode.getBoundingClientRect();
-  const offset = bodyEl ? (bodyEl.getBoundingClientRect().top - pRect.top) : 0;
-  return pRect.top - paneRect.top + scrollTop + offset + 12;
+  return pRect.top - paneRect.top + scrollTop + 12;
 }
 
 // ============================================================
@@ -282,10 +331,13 @@ async function init() {
   els.zoomInBtn.addEventListener('click', () => stepZoom(+1));
   els.zoomOutBtn.addEventListener('click', () => stepZoom(-1));
 
+  applyShowMatchDetails(cfg.showMatchDetails);
+
   initSettingsDialog();
   initAutoLogin();
   initCopyBlock();
   initUpdateDialog();
+  initDiagnostics();
 
   const onUserScroll = () => scrollController.pauseForUserScroll();
   els.scrollArea.addEventListener('wheel', onUserScroll, { passive: true });
@@ -295,10 +347,11 @@ async function init() {
   });
 
   window.api.onPdfLoaded((payload) => {
-    const { title, paragraphs } = payload || {};
-    renderParagraphs(paragraphs || [], title || null);
+    const { title, paragraphs, units } = payload || {};
+    renderParagraphs(paragraphs || [], title || null, units || []);
   });
   window.api.onPositionUpdate((payload) => onPositionUpdate(payload));
+  window.api.onMatchState((payload) => onMatchState(payload));
   window.api.onStatusUpdate(({ message, state: s }) => updateStatus(message, s));
   window.api.onTabActivate((name) => activateTab(name));
 }
@@ -368,7 +421,7 @@ async function resumeWebviewMedia() {
   catch (_) { /* ignore */ }
 }
 
-function renderParagraphs(paragraphs, title) {
+function renderParagraphs(paragraphs, title, units) {
   if (title) {
     els.transcriptTitle.textContent = title;
     els.transcriptTitle.hidden = false;
@@ -379,6 +432,21 @@ function renderParagraphs(paragraphs, title) {
   const hasSpeakers = paragraphs.some((p) => p && p.speaker);
   document.body.classList.toggle('has-speakers', hasSpeakers);
   els.transcript.innerHTML = '';
+
+  state.units = Array.isArray(units) ? units : [];
+  state.sentenceNodes = [];
+  state.sentMeta = [];
+  state.sentToUnit = [];
+  state.activeUnit = -1;
+  state.windowUnits = [];
+  state.lastMatchRange = null;
+  updateMatchHighlight();
+
+  state.units.forEach((u, ui) => {
+    if (!state.sentToUnit[u.para]) state.sentToUnit[u.para] = [];
+    for (let s = u.sentStart; s <= u.sentEnd; s++) state.sentToUnit[u.para][s] = ui;
+  });
+
   state.paragraphNodes = paragraphs.map((para, i) => {
     const p = document.createElement('p');
     p.dataset.index = String(i);
@@ -402,10 +470,53 @@ function renderParagraphs(paragraphs, title) {
 
     const body = document.createElement('span');
     body.className = 'body';
-    body.textContent = para.text;
+
+    // Each sentence is its own clickable span so re-sync can target the exact
+    // spot in a long paragraph. Char offsets into body.textContent are
+    // recorded for word-run highlighting and scroll targeting.
+    const sentences =
+      Array.isArray(para.sentences) && para.sentences.length > 0
+        ? para.sentences
+        : [para.text];
+    const meta = [];
+    const spans = [];
+    let offset = 0;
+
+    if (para.prefix) {
+      const prefixSpan = document.createElement('span');
+      prefixSpan.className = 'prefix';
+      prefixSpan.textContent = `${para.prefix} `;
+      body.appendChild(prefixSpan);
+      offset += para.prefix.length + 1;
+    }
+
+    sentences.forEach((sentence, si) => {
+      const span = document.createElement('span');
+      span.className = 'sentence';
+      span.dataset.para = String(i);
+      span.dataset.sent = String(si);
+      span.textContent = sentence;
+      meta.push({ start: offset, end: offset + sentence.length });
+      offset += sentence.length;
+      body.appendChild(span);
+      if (si < sentences.length - 1) {
+        body.appendChild(document.createTextNode(' '));
+        offset += 1;
+      }
+      span.addEventListener('click', (e) => {
+        e.stopPropagation();
+        resyncToUnit((state.sentToUnit[i] || [])[si]);
+      });
+      spans.push(span);
+    });
+
+    state.sentenceNodes[i] = spans;
+    state.sentMeta[i] = meta;
     p.appendChild(body);
 
-    p.addEventListener('click', () => onParagraphClick(i));
+    // Clicks outside a sentence (margins, speaker tag) resync to the
+    // paragraph's first unit.
+    p.addEventListener('click', () => resyncToUnit((state.sentToUnit[i] || [])[0]));
     els.transcript.appendChild(p);
     return p;
   });
@@ -413,29 +524,112 @@ function renderParagraphs(paragraphs, title) {
   els.transcriptEmpty.hidden = paragraphs.length > 0;
   els.documentPage.hidden = paragraphs.length === 0;
   els.paragraphCount.textContent = `${paragraphs.length} paragraphs`;
+
+  // A freshly loaded document always starts at the top. The main process
+  // emits position:update(0) BEFORE pdf:loaded, so any scroll target computed
+  // against the previous document's DOM is stale — discard it.
+  els.scrollArea.scrollTop = 0;
+  if (scrollController) {
+    scrollController.target = null;
+    scrollController.scrollPos = 0;
+    scrollController.userPausedUntil = state.isListening ? 0 : Number.POSITIVE_INFINITY;
+  }
 }
 
 function onPositionUpdate(payload) {
-  const index = payload && typeof payload === 'object' ? payload.index : payload;
-  const sttText = payload && typeof payload === 'object' ? payload.sttText : null;
-  if (index < 0 || index >= state.paragraphNodes.length) return;
+  if (!payload || typeof payload !== 'object') return;
+  const { index, para, sentStart, sentEnd, sttText } = payload;
+  if (!Number.isInteger(para) || para < 0 || para >= state.paragraphNodes.length) return;
 
-  const paragraphNode = state.paragraphNodes[index];
-  if (!paragraphNode) return;
-
-  const targetY = computeTargetY(paragraphNode, sttText);
+  setActiveUnit(index);
+  const targetY = computeTargetYForUnit(para, sentStart, sentEnd, sttText);
   if (scrollController && Number.isFinite(targetY)) scrollController.setTarget(targetY);
 }
 
-function onParagraphClick(index) {
-  window.api.resync(index);
-  const paragraphNode = state.paragraphNodes[index];
-  if (!paragraphNode || !scrollController) return;
-  const targetY = computeTargetY(paragraphNode, null);
-  if (Number.isFinite(targetY)) {
+function setActiveUnit(unitIdx) {
+  if (state.activeUnit === unitIdx) return;
+  applyUnitClass(state.activeUnit, 'active', false);
+  state.activeUnit = Number.isInteger(unitIdx) ? unitIdx : -1;
+  applyUnitClass(state.activeUnit, 'active', true);
+}
+
+function applyUnitClass(unitIdx, cls, on) {
+  const u = state.units[unitIdx];
+  if (!u) return;
+  const spans = state.sentenceNodes[u.para] || [];
+  for (let s = u.sentStart; s <= u.sentEnd && s < spans.length; s++) {
+    spans[s].classList.toggle(cls, on);
+  }
+}
+
+function resyncToUnit(unitIdx) {
+  if (!Number.isInteger(unitIdx) || !state.units[unitIdx]) return;
+  window.api.resync(unitIdx);
+  setActiveUnit(unitIdx);
+  state.lastMatchRange = null;
+  updateMatchHighlight();
+  const u = state.units[unitIdx];
+  const targetY = computeTargetYForUnit(u.para, u.sentStart, u.sentEnd, null);
+  if (scrollController && Number.isFinite(targetY)) {
     scrollController.setTarget(targetY);
     scrollController.jumpToTarget();
   }
+}
+
+// ============================================================
+// Match visibility (Phase 2) — matched word run + search window
+// ============================================================
+
+function updateMatchHighlight() {
+  if (!('highlights' in CSS)) return;
+  if (state.showMatchDetails && state.lastMatchRange) {
+    CSS.highlights.set('gms-match', new Highlight(state.lastMatchRange));
+  } else {
+    CSS.highlights.delete('gms-match');
+  }
+}
+
+function setWindowRange(from, to) {
+  for (const ui of state.windowUnits) applyUnitClass(ui, 'in-window', false);
+  state.windowUnits = [];
+  if (!state.showMatchDetails) return;
+  if (!Number.isInteger(from) || !Number.isInteger(to)) return;
+  for (let ui = from; ui < to && ui < state.units.length; ui++) {
+    applyUnitClass(ui, 'in-window', true);
+    state.windowUnits.push(ui);
+  }
+}
+
+function onMatchState(payload) {
+  if (!payload || typeof payload !== 'object') return;
+  const { matched, score, window: win } = payload;
+
+  if (win) setWindowRange(win.from, win.to);
+
+  if (!state.showMatchDetails) {
+    els.matchInfo.hidden = true;
+    return;
+  }
+  els.matchInfo.hidden = false;
+  if (win && win.recovery) {
+    els.matchInfo.textContent = matched
+      ? `re-synced · score ${score.toFixed(2)}`
+      : `re-searching ${win.from}–${win.to}…`;
+  } else if (matched) {
+    els.matchInfo.textContent = `match ${score.toFixed(2)} · window ${win ? `${win.from}–${win.to}` : '—'}`;
+  } else {
+    els.matchInfo.textContent = `no match · window ${win ? `${win.from}–${win.to}` : '—'}`;
+  }
+}
+
+function applyShowMatchDetails(enabled) {
+  state.showMatchDetails = enabled !== false;
+  document.body.classList.toggle('show-match-details', state.showMatchDetails);
+  if (!state.showMatchDetails) {
+    setWindowRange(null, null);
+    els.matchInfo.hidden = true;
+  }
+  updateMatchHighlight();
 }
 
 function updateStatus(message, s) {
@@ -566,6 +760,8 @@ async function openSettings() {
   try {
     const s = await window.api.getSettings();
     if (s) {
+      els.settingsWhisperModel.value = s.whisperModel || 'small';
+      els.settingsShowMatch.checked = s.showMatchDetails !== false;
       els.settingsFuseThreshold.value = s.fuseThreshold ?? 0.35;
       els.settingsParagraphsPerSec.value = s.alignmentParagraphsPerSecond ?? 1.0;
       els.settingsScrollGain.value = s.scrollGain ?? SCROLL_GAIN_DEFAULT;
@@ -595,6 +791,8 @@ async function onSaveSettings() {
 
   // Tuning / advanced settings
   const settingsPayload = {
+    whisperModel: els.settingsWhisperModel.value,
+    showMatchDetails: els.settingsShowMatch.checked,
     fuseThreshold: parseFloat(els.settingsFuseThreshold.value),
     alignmentParagraphsPerSecond: parseFloat(els.settingsParagraphsPerSec.value),
     scrollGain: parseFloat(els.settingsScrollGain.value),
@@ -608,13 +806,16 @@ async function onSaveSettings() {
     return;
   }
 
-  // Apply runtime changes to ScrollController immediately
-  if (scrollController && settingsResult.settings) {
-    scrollController.updateTuning({
-      gain: settingsResult.settings.scrollGain,
-      maxVelocity: settingsResult.settings.scrollMaxVelocity,
-      baselineVelocity: settingsResult.settings.scrollBaselineVelocity,
-    });
+  // Apply runtime changes immediately
+  if (settingsResult.settings) {
+    if (scrollController) {
+      scrollController.updateTuning({
+        gain: settingsResult.settings.scrollGain,
+        maxVelocity: settingsResult.settings.scrollMaxVelocity,
+        baselineVelocity: settingsResult.settings.scrollBaselineVelocity,
+      });
+    }
+    applyShowMatchDetails(settingsResult.settings.showMatchDetails);
   }
 
   els.settingsDialog.close();
@@ -751,6 +952,60 @@ async function tryAutoFill() {
   } catch (err) {
     console.warn('[AutoLogin] inject failed:', err && err.message);
   }
+}
+
+// ===== Diagnostics panel =====
+
+let diagRefreshTimer = null;
+
+function renderDiagnostics(d) {
+  if (!d) return;
+  els.diagAudioDevice.textContent = d.audioDevice || '—';
+  els.diagFfmpeg.textContent = d.ffmpegPath || '—';
+  els.diagPython.textContent = d.pythonPath || '—';
+  els.diagWhisper.textContent = d.whisperState || '—';
+  els.diagChunks.textContent = String(d.chunks ?? 0);
+  els.diagTranscriptions.textContent = String(d.transcriptions ?? 0);
+  els.diagLastText.textContent = d.lastText || '—';
+  els.diagLastMatch.textContent = d.lastMatch || '—';
+  els.diagLogPath.textContent = d.logPath || '—';
+  if (Array.isArray(d.recentLog)) {
+    els.diagLog.textContent = d.recentLog.join('\n');
+    els.diagLog.scrollTop = els.diagLog.scrollHeight;
+  }
+}
+
+async function refreshDiagnostics() {
+  try {
+    renderDiagnostics(await window.api.getDiagnostics());
+  } catch (_) {
+    // ignore
+  }
+}
+
+function initDiagnostics() {
+  els.diagBtn.addEventListener('click', () => {
+    const show = els.diagPanel.hidden;
+    els.diagPanel.hidden = !show;
+    if (show) {
+      refreshDiagnostics();
+      diagRefreshTimer = setInterval(refreshDiagnostics, 2000);
+    } else if (diagRefreshTimer) {
+      clearInterval(diagRefreshTimer);
+      diagRefreshTimer = null;
+    }
+  });
+  els.diagClose.addEventListener('click', () => {
+    els.diagPanel.hidden = true;
+    if (diagRefreshTimer) {
+      clearInterval(diagRefreshTimer);
+      diagRefreshTimer = null;
+    }
+  });
+  // Live counter updates while listening (cheap — panel may be closed).
+  window.api.onDiagUpdate((d) => {
+    if (!els.diagPanel.hidden) renderDiagnostics(d);
+  });
 }
 
 // ===== Auto-update modal =====

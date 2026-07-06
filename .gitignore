@@ -1,6 +1,10 @@
 node_modules/
 dist/
 out/
+# Bundled runtimes fetched at build time by scripts/fetch-vendor.mjs
+vendor/ffmpeg/
+vendor/python/
+vendor/tmp/
 *.log
 __pycache__/
 .venv/

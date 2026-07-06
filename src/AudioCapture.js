@@ -16,10 +16,10 @@ const DEVICE_PRIORITY = [
   /vb-audio/i,                 // VB-Audio variant naming
 ];
 
-function listDshowAudioDevices() {
+function listDshowAudioDevices(ffmpegCmd) {
   return new Promise((resolve) => {
     const proc = spawn(
-      'ffmpeg',
+      ffmpegCmd,
       ['-hide_banner', '-list_devices', 'true', '-f', 'dshow', '-i', 'dummy'],
       { stdio: ['ignore', 'pipe', 'pipe'] }
     );
@@ -78,10 +78,11 @@ function pickBestDevice(devices) {
 }
 
 class AudioCapture extends EventEmitter {
-  constructor({ chunkSeconds = 8, overlapSeconds = 2 } = {}) {
+  constructor({ chunkSeconds = 8, overlapSeconds = 2, ffmpegCmd = 'ffmpeg' } = {}) {
     super();
     this.chunkSeconds = chunkSeconds;
     this.overlapSeconds = overlapSeconds;
+    this.ffmpegCmd = ffmpegCmd;
     this.chunkBytes = SAMPLE_RATE * chunkSeconds * BYTES_PER_SAMPLE;
     this.overlapBytes = SAMPLE_RATE * overlapSeconds * BYTES_PER_SAMPLE;
     this.proc = null;
@@ -93,7 +94,7 @@ class AudioCapture extends EventEmitter {
     this.buffer = Buffer.alloc(0);
 
     this.emit('info', 'Enumerating DirectShow audio devices…');
-    const devices = await listDshowAudioDevices();
+    const devices = await listDshowAudioDevices(this.ffmpegCmd);
 
     if (devices.length === 0) {
       this.emit(
@@ -141,7 +142,7 @@ class AudioCapture extends EventEmitter {
       'pipe:1',
     ];
 
-    const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const proc = spawn(this.ffmpegCmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     this.proc = proc;
 
     let stderrBuf = '';

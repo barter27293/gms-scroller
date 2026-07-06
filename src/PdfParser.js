@@ -17,16 +17,25 @@ const PARAGRAPH_GAP_MULTIPLIER = 1.6;
 const LINE_TOLERANCE_RATIO = 0.5;
 const COLUMN_GAP_PT = 25;
 
-const DIGITS_ONLY = /^\d{1,6}$/;
+// Line-level filters. Digit filtering must happen on whole LINES, not on
+// individual pdf.js items: inline numbers ("1 John 4", "Luke 7") are often
+// emitted as their own items and would be lost with item-level filtering.
+// Page numbers and watermark residue form digit-only lines of their own.
+const DIGITS_LINE = /^[\d\s.,:;()\p{Pd}−]*\d[\d\s.,:;()\p{Pd}−]*$/u;
 const PAGE_CODE = /^[A-Z]{1,4}\s*\d{1,4}$/;
 const KEY_TO_INITIALS = /\bKEY\s+TO\s+INITIALS\b/i;
 const HEADING_PATTERN = /\b(?:SCRIPTURES READ|READINGS?\s+(?:IN|AT)|PREACHING\s+(?:IN|AT)|MEETING\s+(?:IN|AT)|MINISTRY\s+(?:IN|AT)|ADDRESS\s+(?:IN|AT)|FELLOWSHIP\s+(?:IN|AT)|GOSPEL PREACHING|BIBLE READING)\b/;
 const INTENTIONALLY_BLANK = /this is intentionally left blank\.?/gi;
-// An initials "unit" is one capital letter, optionally Mc-prefixed, followed
-// by EITHER a dot (standard) OR an em-dash-lowercase-dot tail (e.g. C—n.).
-// A speaker prefix is 2–5 such units. This allows the dash-suffix to appear
-// at ANY position, not just the last unit (D—n.J.H., G—h.M.S., K.R.C—n.).
-const SPEAKER_PREFIX = /^((?:(?:Mc)?[A-Z](?:\s*\.|\s*[\p{Pd}−]+\s*[a-z]\s*\.?))(?:\s*(?:Mc)?[A-Z](?:\s*\.|\s*[\p{Pd}−]+\s*[a-z]\s*\.?)){1,4})\s+(.+)$/su;
+// An initials "unit" is one capital letter, optionally Mc-prefixed, with up
+// to two lowercase letters attached (Th., Ch.), followed by EITHER a dot
+// (standard) OR an em-dash-lowercase tail of 1–3 letters (C—n., K—th.).
+// A speaker prefix is 2–5 such units. The dash-suffix may appear at ANY
+// position, not just the last unit (D—n.J.H., R.W.Th., K—th.F.W., K.R.C—n.).
+const INITIALS_UNIT = '(?:Mc)?[A-Z][a-z]{0,2}(?:\\s*\\.|\\s*[\\p{Pd}−]+\\s*[a-z]{1,3}\\s*\\.?)';
+const SPEAKER_PREFIX = new RegExp(
+  `^((?:${INITIALS_UNIT})(?:\\s*(?:${INITIALS_UNIT})){1,4})\\s+(.+)$`,
+  'su'
+);
 
 function normalizeInitials(raw) {
   if (typeof raw !== 'string') return null;
@@ -58,8 +67,6 @@ function filterItems(items) {
     const str = (it.str || '').trim();
     if (!str) return false;
     if (isRotated(it.transform)) return false;
-    if (DIGITS_ONLY.test(str)) return false;
-    if (PAGE_CODE.test(str)) return false;
     if ((counts.get(str) || 0) > MAX_IDENTICAL_REPEATS_PER_PAGE) return false;
     return true;
   });
@@ -287,13 +294,14 @@ function stitchParagraphs(lines) {
 // these transcripts use, somewhere in the first few pages:
 //   1. [TYPE OF MEETING] AT [PLACE]   (mostly uppercase, contains " AT ")
 //   2. [Speaker]                       (initials + surname, e.g. "B.D. Hales")
-//   3. [Date]                          (weekday, Month day, year)
-// Returns { title, lastTitleLineIdx } where lastTitleLineIdx is the index
-// within `allLines` of the LAST line of the title block, or null if no
-// plausible title was found.
+//   3. [Date]                          (weekday/"Lord's day", then either
+//      "Month day, year" or day-first "18 August 1996")
+// Returns { title, blockStart, blockEnd } where blockStart/blockEnd are the
+// indices within `allLines` of the first and last line of the title block,
+// or { title: null } if no plausible title was found.
 const TITLE_MEETING_RE = /^[A-Z][A-Z'’&.,\- ]*\s+AT\s+[A-Z][A-Z'’&.,\- ]+$/;
 const TITLE_DATE_RE =
-  /^(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat)[a-z]*\.?,?\s+[A-Z][a-z]+\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{2,4}\b/i;
+  /^(?:Lord[’']?s\s+day|(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat)[a-z]*)\.?,?\s+(?:[A-Z][a-z]+\.?\s+\d{1,2}(?:st|nd|rd|th)?|\d{1,2}(?:st|nd|rd|th)?\s+[A-Z][a-z]+\.?),?\s+\d{2,4}\b/i;
 const TITLE_SPEAKER_RE =
   /^(?:(?:Mc)?[A-Z]\.\s*){1,5}(?:Mc)?[A-Z][a-z]+(?:[\s\-][A-Z][a-z]+)*\.?$/;
 
@@ -333,10 +341,10 @@ function detectTitle(allLines, opts = {}) {
       .filter(Boolean)
       .join(' — ');
 
-    return { title, lastTitleLineIdx: dateIdx };
+    return { title, blockStart: i, blockEnd: dateIdx };
   }
 
-  return { title: null, lastTitleLineIdx: -1 };
+  return { title: null, blockStart: -1, blockEnd: -1 };
 }
 
 function trimBeforeHeading(paragraphs) {
@@ -356,12 +364,53 @@ function stripBlankMarkers(paragraphs) {
     .filter((p) => p.length >= MIN_PARAGRAPH_CHARS);
 }
 
+// --- Sentence splitting ------------------------------------------------------
+// Splits a paragraph body into sentences for fine-grained alignment and
+// click-to-resync. Must be abbreviation-aware: transcripts are full of
+// initials chains (J.S.H., R.W.Th., K—th.F.W.), honorifics (Mr., Dr.) and
+// scripture refs whose dots must NOT end a sentence.
+const SENTENCE_END = /[.!?]+[’”"']?/g;
+const INITIALS_CHAIN_UNIT = '(?:Mc)?[A-Z][a-z]{0,2}(?:[\\p{Pd}−][a-z]{1,3})?';
+const ABBREV_TOKEN = new RegExp(
+  `^(?:(?:${INITIALS_CHAIN_UNIT}\\.)+${INITIALS_CHAIN_UNIT}` + // dotted chain: J.S / R.W.Th / K—th.F.W
+    `|(?:Mc)?[A-Z]` + // standalone single initial
+    `|Mr|Mrs|Ms|Dr|Prof|Rev|St|Jr|Sr|Bro|Bros|Vol|Chap|vs|cf|etc|viz)$`,
+  'u'
+);
+
+function splitSentences(text) {
+  const out = [];
+  let start = 0;
+  SENTENCE_END.lastIndex = 0;
+  let m;
+  while ((m = SENTENCE_END.exec(text)) !== null) {
+    const end = m.index + m[0].length;
+    if (end >= text.length) break; // final sentence handled by the tail push
+    const rest = text.slice(end);
+    const restTrim = rest.replace(/^\s+/, '');
+    // A boundary needs whitespace after the punctuation and a new-sentence
+    // opener next (capital, quote, or digit — scripture refs open sentences).
+    if (rest.length === restTrim.length) continue;
+    if (!/^[“"‘'’A-Z0-9]/.test(restTrim)) continue;
+    if (m[0].startsWith('.')) {
+      const tokenM = text.slice(0, m.index).match(/(\S+)$/u);
+      if (tokenM && ABBREV_TOKEN.test(tokenM[1])) continue;
+    }
+    const sentence = text.slice(start, end).trim();
+    if (sentence) out.push(sentence);
+    start = end;
+  }
+  const tail = text.slice(start).trim();
+  if (tail) out.push(tail);
+  return out.length > 0 ? out : [text.trim()];
+}
+
 function attachSpeakers(paragraphs, speakers) {
   return paragraphs.map((text) => {
     const m = text.match(SPEAKER_PREFIX);
-    if (!m) return { text };
+    if (!m) return { text, sentences: splitSentences(text) };
     const canonical = normalizeInitials(m[1]);
-    if (!canonical || !speakers.has(canonical)) return { text };
+    if (!canonical || !speakers.has(canonical)) return { text, sentences: splitSentences(text) };
     const info = speakers.get(canonical);
 
     const rawPrefix = m[1].trim();
@@ -373,6 +422,8 @@ function attachSpeakers(paragraphs, speakers) {
     return {
       text: displayText,
       alignText: body,
+      prefix: tidiedPrefix,
+      sentences: splitSentences(body),
       speaker: { initials: canonical, name: info.name, place: info.place },
     };
   });
@@ -392,21 +443,32 @@ async function parse(filePath, opts = {}) {
     const content = await page.getTextContent();
     const items = filterItems(content.items);
     if (items.length === 0) continue;
-    const lines = groupIntoLines(items).filter((line) => !PAGE_CODE.test(line.text));
+    const lines = groupIntoLines(items).filter(
+      (line) => !PAGE_CODE.test(line.text) && !DIGITS_LINE.test(line.text)
+    );
     for (const line of lines) line.pageNum = pageNum;
     allLines.push(...lines);
   }
 
-  const { title, lastTitleLineIdx } = detectTitle(allLines);
+  const { title, blockStart, blockEnd } = detectTitle(allLines);
   if (title) {
     console.log(`[PdfParser] detected title: "${title}"`);
   }
 
-  // Drop everything strictly before AND the title lines themselves, so the
-  // preamble (T&Cs, copyright, etc.) and the title don't appear in the body —
-  // the title is shown separately as a sticky banner in the renderer.
-  const linesAfterTitle =
-    lastTitleLineIdx >= 0 ? allLines.slice(lastTitleLineIdx + 1) : allLines;
+  // Remove the title lines themselves — the title is shown separately as a
+  // sticky banner in the renderer. When the title precedes all content
+  // headings, also drop everything before it (T&Cs, copyright preamble).
+  // Some documents place the SCRIPTURES READ section BEFORE the title block;
+  // in that case only the title lines are removed so the scriptures survive.
+  let linesAfterTitle = allLines;
+  if (blockStart >= 0) {
+    const firstHeadingIdx = allLines.findIndex((l) => HEADING_PATTERN.test(l.text));
+    if (firstHeadingIdx === -1 || firstHeadingIdx > blockStart) {
+      linesAfterTitle = allLines.slice(blockEnd + 1);
+    } else {
+      linesAfterTitle = allLines.filter((_, idx) => idx < blockStart || idx > blockEnd);
+    }
+  }
 
   const { speakers, lines: contentLines } = extractSpeakers(linesAfterTitle, verbose);
 

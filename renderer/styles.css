@@ -242,6 +242,41 @@ body.has-speakers #document-page {
   background: rgba(0, 0, 0, 0.04);
 }
 
+/* Sentence spans — clickable re-sync targets */
+#document-page #transcript .sentence {
+  border-radius: 2px;
+  transition: background 0.15s;
+}
+#document-page #transcript .sentence:hover {
+  background: rgba(78, 161, 243, 0.18);
+}
+#document-page #transcript .prefix {
+  font-weight: 600;
+}
+
+/* Current position — the sentence range the audio is matched to */
+#document-page #transcript .sentence.active {
+  background: var(--highlight);
+  color: var(--highlight-fg);
+}
+
+/* Match-details mode: sentences inside the engine's search window */
+body.show-match-details #document-page #transcript .sentence.in-window {
+  box-shadow: inset 0 -2px 0 rgba(78, 161, 243, 0.35);
+}
+
+/* The exact word run the last STT chunk matched */
+::highlight(gms-match) {
+  background-color: rgba(76, 175, 80, 0.45);
+}
+
+#match-info {
+  font-size: 12px;
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 /* Sidenote: positioned outside the white page, on the grey background */
 #document-page .speaker {
   position: absolute;
@@ -311,6 +346,81 @@ body.fullscreen #btn-fullscreen-exit { display: inline-block; }
   border: none;
 }
 
+/* ===== Diagnostics panel ===== */
+
+#diag-panel {
+  position: fixed;
+  right: 12px;
+  bottom: 12px;
+  width: 480px;
+  max-width: calc(100vw - 24px);
+  max-height: 60vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.5);
+  z-index: 900;
+  font-size: 12px;
+}
+#diag-panel[hidden] { display: none; }
+#diag-panel header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+#diag-panel h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+#diag-panel #diag-close {
+  background: transparent;
+  border: none;
+  color: var(--fg-muted);
+  cursor: pointer;
+  font-size: 13px;
+}
+#diag-panel #diag-close:hover { color: var(--fg); }
+#diag-grid {
+  padding: 10px 14px;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 4px;
+}
+#diag-grid > div {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+#diag-grid .diag-label {
+  flex: 0 0 110px;
+  color: var(--fg-muted);
+}
+#diag-grid span:not(.diag-label) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#diag-log {
+  margin: 0;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  overflow: auto;
+  flex: 1 1 auto;
+  min-height: 80px;
+  max-height: 220px;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--fg-muted);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
 /* ===== Settings dialog ===== */
 
 dialog#settings-dialog {
@@ -360,6 +470,15 @@ dialog#settings-dialog label > span {
   font-size: 12px;
   color: var(--fg-muted);
   margin-bottom: 4px;
+}
+dialog#settings-dialog select {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 13px;
+  max-width: 320px;
 }
 dialog#settings-dialog input[type="text"],
 dialog#settings-dialog input[type="password"],

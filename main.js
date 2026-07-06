@@ -28,6 +28,12 @@ const { AudioCapture } = require('./src/AudioCapture');
 const { WhisperBridge } = require('./src/WhisperBridge');
 const { AlignmentEngine } = require('./src/AlignmentEngine');
 const { initAutoUpdater, downloadUpdate, quitAndInstall } = require('./src/Updater');
+const Paths = require('./src/Paths');
+const FileLog = require('./src/FileLog');
+
+// Tee console output into <userData>/logs/main.log — packaged builds have no
+// console, so this is the only way to diagnose failures in installed copies.
+FileLog.init(path.join(app.getPath('userData'), 'logs'));
 
 const DEFAULTS = {
   audioSiteUrl: 'https://globalmediastream.com/',
@@ -37,6 +43,7 @@ const DEFAULTS = {
   fuseThreshold: 0.35,
   highlightColour: '#fff3cd',
   autoScrollResumeDelay: 3000,
+  showMatchDetails: true,
   // Advanced — tuning previously hardcoded in source.
   verboseLogging: false,
   alignmentParagraphsPerSecond: 1.0,
@@ -59,6 +66,76 @@ function sendStatus(message, state) {
   }
 }
 
+// ---- Diagnostics state (surfaced in the renderer's diagnostics panel) ----
+const diag = {
+  audioDevice: null,
+  chunks: 0,
+  transcriptions: 0,
+  lastText: null,
+  lastMatch: null,
+  whisperState: 'not started',
+};
+
+function diagSnapshot(includeLog) {
+  const snap = {
+    ...diag,
+    ffmpegPath: Paths.ffmpegCmd(app.isPackaged),
+    pythonPath: Paths.pythonCmd(app.isPackaged),
+    logPath: FileLog.getLogPath(),
+  };
+  if (includeLog) snap.recentLog = FileLog.getRecentLines().slice(-60);
+  return snap;
+}
+
+function sendDiag() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('diag:update', diagSnapshot(false));
+  }
+}
+
+// Group each paragraph's sentences into alignment units of roughly one STT
+// chunk's worth of words. Each unit remembers which paragraph and sentence
+// range it covers so the renderer can highlight and scroll to sentences.
+const MIN_UNIT_WORDS = 12;
+const MAX_UNIT_WORDS = 40;
+
+function buildUnits(paragraphs) {
+  const units = [];
+  paragraphs.forEach((p, para) => {
+    const sentences =
+      Array.isArray(p.sentences) && p.sentences.length > 0
+        ? p.sentences
+        : [p.alignText || p.text];
+    let start = 0;
+    let words = 0;
+    let texts = [];
+    const flush = (end) => {
+      if (texts.length > 0) {
+        units.push({ text: texts.join(' '), para, sentStart: start, sentEnd: end });
+      }
+    };
+    for (let s = 0; s < sentences.length; s++) {
+      const w = sentences[s].split(/\s+/).filter(Boolean).length;
+      if (words > 0 && words + w > MAX_UNIT_WORDS) {
+        flush(s - 1);
+        start = s;
+        words = 0;
+        texts = [];
+      }
+      texts.push(sentences[s]);
+      words += w;
+      if (words >= MIN_UNIT_WORDS) {
+        flush(s);
+        start = s + 1;
+        words = 0;
+        texts = [];
+      }
+    }
+    flush(sentences.length - 1);
+  });
+  return units;
+}
+
 async function loadPdfFromPath(filePath) {
   try {
     sendStatus('Parsing PDF…', 'idle');
@@ -68,12 +145,15 @@ async function loadPdfFromPath(filePath) {
     const { title = null, paragraphs } = Array.isArray(result)
       ? { title: null, paragraphs: result }
       : result;
-    const texts = paragraphs.map((p) => p.alignText || p.text);
-    if (alignment) alignment.setParagraphs(texts);
+    const units = buildUnits(paragraphs);
+    // Renderer must rebuild the DOM before the position-update from
+    // setUnits arrives — IPC messages are delivered in send order.
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('pdf:loaded', { title, paragraphs });
+      mainWindow.webContents.send('pdf:loaded', { title, paragraphs, units });
     }
+    if (alignment) alignment.setUnits(units);
     const speakerCount = paragraphs.filter((p) => p.speaker).length;
+    console.log(`[Pdf] ${paragraphs.length} paragraphs -> ${units.length} alignment units`);
     sendStatus(`Loaded ${paragraphs.length} paragraphs (${speakerCount} attributed)`, 'idle');
     return { ok: true, count: paragraphs.length };
   } catch (err) {
@@ -135,6 +215,14 @@ function createWindow() {
 
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 
+  // Renderer warnings/errors are invisible in packaged builds (no devtools) —
+  // forward them into the main console/log file.
+  mainWindow.webContents.on('console-message', (_evt, level, message, line, sourceId) => {
+    if (level >= 2) {
+      console.warn(`[Renderer] ${message} (${path.basename(sourceId || '')}:${line})`);
+    }
+  });
+
   // F11 toggles OS fullscreen.
   mainWindow.webContents.on('before-input-event', (event, input) => {
     if (input.type === 'keyDown' && input.key === 'F11') {
@@ -159,13 +247,26 @@ function createWindow() {
 function initPipeline() {
   alignment = new AlignmentEngine({
     threshold: store.get('fuseThreshold'),
-    paragraphsPerSecond: store.get('alignmentParagraphsPerSecond'),
+    unitsPerSecond: store.get('alignmentParagraphsPerSecond'),
   });
   alignment.on('position-update', (payload) => {
-    console.log(`[Alignment] position-update -> paragraph #${payload.index}`);
+    console.log(
+      `[Alignment] position-update -> unit #${payload.index} (para ${payload.para}, sentences ${payload.sentStart}–${payload.sentEnd})`
+    );
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('position:update', payload);
     }
+  });
+  // Every match attempt (hit or miss) drives the match-visibility UI.
+  alignment.on('attempt', (payload) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('match:state', payload);
+    }
+    const win = payload.window ? `${payload.window.from}–${payload.window.to}` : '—';
+    diag.lastMatch = payload.matched
+      ? `unit #${payload.index}, score ${payload.score.toFixed(3)} (window ${win}${payload.window && payload.window.recovery ? ', recovery' : ''})`
+      : `no match (window ${win})`;
+    sendDiag();
   });
   alignment.on('no-match', (text) => {
     console.log(`[Alignment] no match for: "${(text || '').slice(0, 80)}"`);
@@ -179,7 +280,7 @@ function initPipeline() {
 function startListening() {
   if (audio || whisper) return;
 
-  if (alignment && alignment.paragraphs.length === 0) {
+  if (alignment && alignment.units.length === 0) {
     console.warn('[Pipeline] Listen clicked but no PDF loaded — alignment will produce no matches.');
     sendStatus('Load a PDF first', 'lost');
     return;
@@ -191,12 +292,28 @@ function startListening() {
   audio = new AudioCapture({
     chunkSeconds: store.get('chunkSeconds'),
     overlapSeconds: store.get('overlapSeconds'),
+    ffmpegCmd: Paths.ffmpegCmd(app.isPackaged),
   });
-  whisper = new WhisperBridge({ model: store.get('whisperModel') });
+  // The worker script must resolve OUTSIDE app.asar in packaged builds —
+  // python.exe cannot read files inside the asar archive.
+  whisper = new WhisperBridge({
+    model: store.get('whisperModel'),
+    workerPath: Paths.whisperWorkerPath(app.isPackaged),
+    pythonCmd: Paths.pythonCmd(app.isPackaged),
+  });
+  console.log(`[Pipeline] ffmpeg=${Paths.ffmpegCmd(app.isPackaged)} python=${Paths.pythonCmd(app.isPackaged)} worker=${Paths.whisperWorkerPath(app.isPackaged)}`);
 
   let chunkCount = 0;
   let transcriptionCount = 0;
   const startedAt = Date.now();
+
+  diag.audioDevice = null;
+  diag.chunks = 0;
+  diag.transcriptions = 0;
+  diag.lastText = null;
+  diag.lastMatch = null;
+  diag.whisperState = 'starting…';
+  sendDiag();
 
   if (watchdogTimer) clearInterval(watchdogTimer);
   watchdogTimer = setInterval(() => {
@@ -220,13 +337,20 @@ function startListening() {
 
   audio.on('chunk', (buf) => {
     chunkCount++;
+    diag.chunks = chunkCount;
     if (chunkCount === 1 || chunkCount % 5 === 0) {
       console.log(`[Audio] chunk #${chunkCount} (${buf.length} bytes)`);
+      sendDiag();
     }
     if (whisper) whisper.send(buf);
   });
   audio.on('info', (msg) => {
     console.log(`[Audio] ${msg}`);
+    const deviceM = msg.match(/^Using audio device: "(.+)"$/);
+    if (deviceM) {
+      diag.audioDevice = deviceM[1];
+      sendDiag();
+    }
     sendStatus(msg, 'listening');
   });
   audio.on('error', (err) => {
@@ -237,15 +361,22 @@ function startListening() {
 
   whisper.on('transcription', (text) => {
     transcriptionCount++;
+    diag.transcriptions = transcriptionCount;
+    diag.lastText = text;
+    diag.whisperState = 'transcribing';
     console.log(`[Whisper] #${transcriptionCount}: "${text}"`);
     if (alignment) alignment.match(text);
     sendStatus('Synced', 'synced');
   });
   whisper.on('info', (msg) => {
     console.log(`[Whisper] ${msg}`);
+    if (/loading/i.test(msg)) diag.whisperState = 'loading model…';
+    else if (/model ready/i.test(msg)) diag.whisperState = 'ready';
     if (msg.toLowerCase().includes('error')) {
+      diag.whisperState = `error: ${msg.slice(0, 120)}`;
       sendStatus(msg, 'lost');
     }
+    sendDiag();
   });
   whisper.on('error', (err) => {
     console.error(`[Whisper] ERROR: ${err.message}`);
@@ -285,9 +416,12 @@ function registerIpc() {
     scrollGain: store.get('scrollGain'),
     scrollMaxVelocity: store.get('scrollMaxVelocity'),
     scrollBaselineVelocity: store.get('scrollBaselineVelocity'),
+    showMatchDetails: store.get('showMatchDetails'),
   }));
 
   ipcMain.handle('settings:get', () => ({
+    whisperModel: store.get('whisperModel'),
+    showMatchDetails: store.get('showMatchDetails'),
     fuseThreshold: store.get('fuseThreshold'),
     alignmentParagraphsPerSecond: store.get('alignmentParagraphsPerSecond'),
     scrollGain: store.get('scrollGain'),
@@ -302,8 +436,13 @@ function registerIpc() {
     }
     const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
     const numOrDefault = (v, fallback) => (Number.isFinite(Number(v)) ? Number(v) : fallback);
+    const WHISPER_MODELS = ['tiny', 'base', 'small', 'medium', 'large-v3'];
 
     const next = {
+      whisperModel: WHISPER_MODELS.includes(payload.whisperModel)
+        ? payload.whisperModel
+        : store.get('whisperModel'),
+      showMatchDetails: payload.showMatchDetails !== false,
       fuseThreshold: clamp(numOrDefault(payload.fuseThreshold, 0.35), 0.1, 0.8),
       alignmentParagraphsPerSecond: clamp(numOrDefault(payload.alignmentParagraphsPerSecond, 1.0), 0.1, 5.0),
       scrollGain: clamp(numOrDefault(payload.scrollGain, 0.35), 0.05, 2.0),
@@ -317,7 +456,7 @@ function registerIpc() {
     // Apply runtime changes where possible
     if (alignment) {
       alignment.setThreshold(next.fuseThreshold);
-      alignment.setParagraphsPerSecond(next.alignmentParagraphsPerSecond);
+      alignment.setUnitsPerSecond(next.alignmentParagraphsPerSecond);
     }
 
     return { ok: true, settings: next };
@@ -350,6 +489,8 @@ function registerIpc() {
   ipcMain.on('align:resync', (_, index) => {
     if (alignment) alignment.resync(index);
   });
+
+  ipcMain.handle('diag:get', () => diagSnapshot(true));
 
   // Secure credential storage via OS keychain (DPAPI on Windows).
   ipcMain.handle('credentials:get', () => {
@@ -409,6 +550,12 @@ app.whenReady().then(() => {
   registerIpc();
   attachWebviewDownloadHandler();
   createWindow();
+
+  // Support "Open with…" / command-line PDF loading: gms-scroller file.pdf
+  const pdfArg = process.argv.slice(1).find((a) => /\.pdf$/i.test(a));
+  if (pdfArg && fs.existsSync(pdfArg)) {
+    mainWindow.webContents.once('did-finish-load', () => loadPdfFromPath(pdfArg));
+  }
 
   // Check GitHub for a newer release on every launch (packaged builds only —
   // autoUpdater has no update feed in `npm start`).

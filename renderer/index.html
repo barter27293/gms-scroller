@@ -26,8 +26,10 @@
       </div>
 
       <span id="status" data-state="idle">Idle</span>
+      <span id="match-info" title="Last match score and current search window" hidden></span>
       <span id="paragraph-count"></span>
 
+      <button id="btn-diagnostics" title="Show diagnostics">Diagnostics</button>
       <button id="btn-fullscreen" title="Toggle fullscreen (F11)">⛶ Fullscreen</button>
       <button id="btn-settings" title="Settings">Settings</button>
     </header>
@@ -87,13 +89,29 @@
           <p class="hint">Controls how the transcript text matches the audio stream.</p>
 
           <label>
+            <span>Speech recognition model <em>(larger = more accurate, slower; first use downloads the model)</em></span>
+            <select id="settings-whisper-model">
+              <option value="tiny">tiny (~75 MB, fastest)</option>
+              <option value="base">base (~140 MB)</option>
+              <option value="small">small (~460 MB, recommended)</option>
+              <option value="medium">medium (~1.5 GB)</option>
+              <option value="large-v3">large-v3 (~2.9 GB, most accurate)</option>
+            </select>
+          </label>
+
+          <label>
             <span>Match threshold <em>(lower = stricter; 0.10–0.80)</em></span>
             <input type="number" id="settings-fuse-threshold" min="0.10" max="0.80" step="0.05" />
           </label>
 
           <label>
-            <span>Window expansion rate <em>(paragraphs/sec; 0.1–5.0)</em></span>
+            <span>Window expansion rate <em>(segments/sec; 0.1–5.0)</em></span>
             <input type="number" id="settings-paragraphs-per-sec" min="0.1" max="5.0" step="0.1" />
+          </label>
+
+          <label class="checkbox-label">
+            <input type="checkbox" id="settings-show-match" />
+            <span>Show match details <em>(highlight matched words + search window in the transcript)</em></span>
           </label>
         </fieldset>
 
@@ -133,6 +151,25 @@
         </div>
       </form>
     </dialog>
+
+    <aside id="diag-panel" hidden>
+      <header>
+        <h3>Diagnostics</h3>
+        <button id="diag-close" title="Close">✕</button>
+      </header>
+      <div id="diag-grid">
+        <div><span class="diag-label">Audio device</span><span id="diag-audio-device">—</span></div>
+        <div><span class="diag-label">FFmpeg</span><span id="diag-ffmpeg">—</span></div>
+        <div><span class="diag-label">Python</span><span id="diag-python">—</span></div>
+        <div><span class="diag-label">Whisper</span><span id="diag-whisper">—</span></div>
+        <div><span class="diag-label">Audio chunks</span><span id="diag-chunks">0</span></div>
+        <div><span class="diag-label">Transcriptions</span><span id="diag-transcriptions">0</span></div>
+        <div><span class="diag-label">Last heard</span><span id="diag-last-text">—</span></div>
+        <div><span class="diag-label">Last match</span><span id="diag-last-match">—</span></div>
+        <div><span class="diag-label">Log file</span><span id="diag-log-path">—</span></div>
+      </div>
+      <pre id="diag-log"></pre>
+    </aside>
 
     <dialog id="update-dialog">
       <h2 id="update-title">Update available</h2>

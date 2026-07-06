@@ -27,6 +27,10 @@ jobs:
       # Regenerate build/icon.ico from build/icon.png.
       - run: npm run build:icon
 
+      # Download the bundled FFmpeg + Python (faster-whisper) runtimes into
+      # vendor/ — shipped via extraResources so users need nothing installed.
+      - run: node scripts/fetch-vendor.mjs
+
       # Build the NSIS installer and publish it (+ latest.yml) to a draft
       # GitHub release. Edit the release notes on GitHub, then publish it so
       # clients pick up the update.
