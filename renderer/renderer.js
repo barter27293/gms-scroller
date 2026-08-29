@@ -1,6 +1,4 @@
 const els = {
-  loadBtn: document.getElementById('btn-load-pdf'),
-  listenBtn: document.getElementById('btn-listen'),
   stopBtn: document.getElementById('btn-stop'),
   settingsBtn: document.getElementById('btn-settings'),
   fullscreenBtn: document.getElementById('btn-fullscreen'),
@@ -8,16 +6,18 @@ const els = {
   zoomInBtn: document.getElementById('btn-zoom-in'),
   zoomOutBtn: document.getElementById('btn-zoom-out'),
   zoomLevel: document.getElementById('zoom-level'),
+  speedDownBtn: document.getElementById('btn-speed-down'),
+  speedUpBtn: document.getElementById('btn-speed-up'),
+  speedLevel: document.getElementById('speed-level'),
+  timeRemaining: document.getElementById('time-remaining'),
   tabs: document.querySelectorAll('#tabs .tab'),
   tabPanels: {
     transcript: document.getElementById('tab-transcript'),
     browser: document.getElementById('tab-browser'),
   },
   status: document.getElementById('status'),
-  matchInfo: document.getElementById('match-info'),
-  paragraphCount: document.getElementById('paragraph-count'),
   transcript: document.getElementById('transcript'),
-  transcriptTitle: document.getElementById('transcript-title'),
+  transcriptTitleText: document.getElementById('transcript-title-text'),
   transcriptEmpty: document.getElementById('transcript-empty'),
   documentPage: document.getElementById('document-page'),
   scrollArea: document.getElementById('scroll-area'),
@@ -30,7 +30,9 @@ const els = {
   settingsWhisperModel: document.getElementById('settings-whisper-model'),
   settingsShowMatch: document.getElementById('settings-show-match'),
   settingsFuseThreshold: document.getElementById('settings-fuse-threshold'),
-  settingsParagraphsPerSec: document.getElementById('settings-paragraphs-per-sec'),
+  settingsExpansionRate: document.getElementById('settings-expansion-rate'),
+  settingsShowDiagnostics: document.getElementById('settings-show-diagnostics'),
+  settingsVersion: document.getElementById('settings-version'),
   settingsScrollGain: document.getElementById('settings-scroll-gain'),
   settingsScrollBaseline: document.getElementById('settings-scroll-baseline'),
   settingsScrollMax: document.getElementById('settings-scroll-max'),
@@ -39,8 +41,9 @@ const els = {
   settingsCancelBtn: document.getElementById('settings-cancel'),
   settingsClearBtn: document.getElementById('settings-clear'),
 
-  diagBtn: document.getElementById('btn-diagnostics'),
   diagPanel: document.getElementById('diag-panel'),
+  diagStatus: document.getElementById('diag-status'),
+  diagParagraphs: document.getElementById('diag-paragraphs'),
   diagClose: document.getElementById('diag-close'),
   diagAudioDevice: document.getElementById('diag-audio-device'),
   diagFfmpeg: document.getElementById('diag-ffmpeg'),
@@ -77,6 +80,8 @@ const state = {
   autoScrollResumeDelay: 3000,
   isListening: false,
   activeTab: 'transcript',
+  hasTranscript: false,
+  mediaPlaying: false,
 };
 
 // ---- Scroll controller defaults (overridable per-instance from config) ----
@@ -89,7 +94,17 @@ const SCROLL_DEAD_ZONE = 40; // px from target before we taper toward baseline
 const ZOOM_LEVELS = [0.75, 0.85, 0.95, 1.0, 1.1, 1.25, 1.4, 1.6, 1.8, 2.0];
 let zoomIdx = ZOOM_LEVELS.indexOf(1.0);
 
+// ---- Playback speed (up to +25%) ----
+const SPEED_LEVELS = [1.0, 1.05, 1.1, 1.15, 1.2, 1.25];
+let speedIdx = 0;
+
+// ---- Time-remaining / playbackRate poll ----
+const MEDIA_POLL_MS = 1000;
+let mediaPollTimer = null;
+
 let scrollController = null;
+// Unscaled config value; applySpeed() multiplies it by the playback rate.
+let baseBaselineVelocity = SCROLL_BASELINE_V_DEFAULT;
 
 // ============================================================
 // Scroll controller
@@ -306,6 +321,10 @@ async function init() {
   if (cfg.highlightColour) {
     document.documentElement.style.setProperty('--highlight', cfg.highlightColour);
   }
+  // Subscribe to the webview's media events BEFORE it navigates, so the very
+  // first play of the session is captured. This is what lets us derive
+  // playback state purely from events and drop any DOM probing.
+  initMediaWatch();
   if (cfg.audioSiteUrl) {
     els.webview.src = cfg.audioSiteUrl;
   }
@@ -313,16 +332,19 @@ async function init() {
   initZoom();
   initTabs();
 
+  baseBaselineVelocity = Number.isFinite(cfg.scrollBaselineVelocity)
+    ? cfg.scrollBaselineVelocity
+    : SCROLL_BASELINE_V_DEFAULT;
   scrollController = new ScrollController(els.scrollArea, {
     gain: cfg.scrollGain,
     maxVelocity: cfg.scrollMaxVelocity,
-    baselineVelocity: cfg.scrollBaselineVelocity,
+    baselineVelocity: baseBaselineVelocity,
   });
   scrollController.start();
+  // After scrollController exists — applySpeed() rescales its drift velocity.
+  initSpeed();
 
-  els.loadBtn.addEventListener('click', onLoadPdf);
-  els.listenBtn.addEventListener('click', onListen);
-  els.stopBtn.addEventListener('click', onStop);
+  els.stopBtn.addEventListener('click', onTransportClick);
   els.settingsBtn.addEventListener('click', openSettings);
   els.fullscreenBtn.addEventListener('click', () => window.api.toggleFullScreen());
   els.fullscreenExitBtn.addEventListener('click', () => window.api.toggleFullScreen());
@@ -330,8 +352,12 @@ async function init() {
   window.api.isFullScreen().then(updateFullScreenUI).catch(() => {});
   els.zoomInBtn.addEventListener('click', () => stepZoom(+1));
   els.zoomOutBtn.addEventListener('click', () => stepZoom(-1));
+  els.speedUpBtn.addEventListener('click', () => stepSpeed(+1));
+  els.speedDownBtn.addEventListener('click', () => stepSpeed(-1));
 
   applyShowMatchDetails(cfg.showMatchDetails);
+  setDiagnosticsVisible(cfg.showDiagnostics === true);
+  updateTransportUI();
 
   initSettingsDialog();
   initAutoLogin();
@@ -356,79 +382,221 @@ async function init() {
   window.api.onTabActivate((name) => activateTab(name));
 }
 
-async function onLoadPdf() {
-  const filePath = await window.api.pickPdf();
-  if (!filePath) return;
-  const result = await window.api.loadPdf(filePath);
-  if (!result || !result.ok) {
-    updateStatus(result && result.error ? result.error : 'Failed to load PDF', 'lost');
+// ============================================================
+// Media layer — one element picker, one transport, one poll
+// ============================================================
+
+// Every media operation goes through this single injected script. The four
+// earlier snippets each picked the element by different rules, which meant
+// pause, resume, speed and time-remaining could silently target different
+// <audio> nodes if the site ever held a hidden preloader.
+//
+// NOTE: executeJavaScript runs in the webview's TOP FRAME only. If the site
+// ever moves its player into an iframe, every op here returns null (and the
+// media-* events, which DO fire for subframes, would keep working) — the
+// symptom is dead transport controls, not a crash.
+function mediaExec(op, arg) {
+  if (!els.webview) return Promise.resolve(null);
+
+  // pickMediaIndex lives in helpers.js so it can be unit-tested; it is
+  // stringified in here because the choice has to be made inside the guest
+  // page, where the elements actually are.
+  const code = `
+    (function () {
+      function all() {
+        return Array.prototype.slice.call(document.querySelectorAll('audio, video'));
+      }
+
+      function markActive(el) {
+        all().forEach(function (o) { o.removeAttribute('data-gms-active'); });
+        el.setAttribute('data-gms-active', '1');
+      }
+
+      // Install a play-tracker once per element. This is what lets us follow
+      // the user to a second player on the page even when they start it from
+      // the site's own controls. Idempotent — safe to re-run every call, which
+      // also covers players added after page load.
+      all().forEach(function (el) {
+        if (el.__gmsTracked) return;
+        el.__gmsTracked = true;
+        el.addEventListener('play', function () { markActive(el); });
+        // The first play may predate this listener (it is installed on the
+        // first poll, which the play event itself triggers), so seed from the
+        // current state.
+        if (!el.paused && !el.ended) markActive(el);
+      });
+
+      ${pickMediaIndex.toString()}
+
+      var list = all();
+      var idx = pickMediaIndex(list.map(function (el) {
+        return {
+          paused: el.paused,
+          ended: el.ended,
+          active: el.hasAttribute('data-gms-active'),
+          currentTime: el.currentTime,
+          duration: el.duration,
+        };
+      }));
+      var m = idx >= 0 ? list[idx] : null;
+      if (!m) return null;
+
+      var op = ${JSON.stringify(op)};
+      if (op === 'pause') {
+        try { m.pause(); } catch (_) {}
+      } else if (op === 'resume') {
+        try { markActive(m); var pr = m.play(); if (pr && pr.catch) pr.catch(function () {}); } catch (_) {}
+      } else if (op === 'poll') {
+        var rate = ${JSON.stringify(arg == null ? null : arg)};
+        if (rate && m.playbackRate !== rate) { try { m.playbackRate = rate; } catch (_) {} }
+      }
+
+      return {
+        t: m.currentTime,
+        d: m.duration,
+        r: m.playbackRate,
+        paused: m.paused,
+        // The webview's media-paused event fires per ELEMENT. With two players
+        // on the page one can pause while the other keeps going, so the
+        // renderer needs the page-wide answer before it gates transcription.
+        anyPlaying: list.some(function (el) { return !el.paused && !el.ended; }),
+        count: list.length,
+        id: m.id || null,
+      };
+    })();
+  `;
+
+  // executeJavaScript can throw SYNCHRONOUSLY when the webview has not
+  // attached yet (applySpeed runs during init, before src is loaded), so the
+  // promise .catch() alone is not enough to keep init() alive.
+  try {
+    return els.webview.executeJavaScript(code).catch(() => null);
+  } catch (_) {
+    return Promise.resolve(null);
   }
 }
 
-function onListen() {
-  window.api.listenStart();
-  state.isListening = true;
-  els.listenBtn.disabled = true;
-  els.stopBtn.disabled = false;
-  if (scrollController) scrollController.resume();
-  if (state.audioWasPaused) {
-    resumeWebviewMedia();
-    state.audioWasPaused = false;
+// Single source of truth for playback state. Driven by the webview's own
+// media events, so it stays correct when the user pauses from the site's own
+// player controls rather than our button.
+async function setMediaPlaying(playing) {
+  if (!playing) {
+    // media-paused fires per ELEMENT, and a page can carry one player per
+    // reading. Pausing the second must not gate transcription while the first
+    // is still running, so ask the page rather than trusting the event.
+    const info = await mediaExec('poll', SPEED_LEVELS[speedIdx]);
+    if (info && info.anyPlaying) {
+      state.mediaPlaying = true;
+      updateTransportUI();
+      return;
+    }
+  }
+
+  state.mediaPlaying = !!playing;
+
+  if (state.mediaPlaying) {
+    if (state.hasTranscript && !state.isListening) {
+      window.api.setMediaPlaying(true);
+      state.isListening = true;
+      if (scrollController) scrollController.resume();
+    }
+    startMediaPoll();
+  } else if (state.isListening) {
+    // Main gates the chunk handler; it does NOT tear the pipeline down. A
+    // 5-minute idle reaper there reclaims ffmpeg + whisper if we never resume.
+    window.api.setMediaPlaying(false);
+    state.isListening = false;
+    if (scrollController) scrollController.pauseIndefinitely();
+    stopMediaPoll();
+  } else {
+    stopMediaPoll();
+  }
+
+  updateTransportUI();
+}
+
+function updateTransportUI() {
+  if (!els.stopBtn) return;
+  els.stopBtn.disabled = !state.hasTranscript;
+  // With no transcript the button is inert, so show the neutral Pause label
+  // rather than offering to "Resume" something that never started.
+  const canResume = state.hasTranscript && !state.mediaPlaying;
+  els.stopBtn.textContent = canResume ? '▶ Resume' : '▐▐ Pause';
+}
+
+// Fire and forget: the webview's media event is what actually flips our state,
+// so we never optimistically toggle the label here.
+function onTransportClick() {
+  mediaExec(state.mediaPlaying ? 'pause' : 'resume');
+}
+
+function startMediaPoll() {
+  if (mediaPollTimer) return;
+  pollMedia();
+  mediaPollTimer = setInterval(pollMedia, MEDIA_POLL_MS);
+}
+
+function stopMediaPoll() {
+  if (!mediaPollTimer) return;
+  clearInterval(mediaPollTimer);
+  mediaPollTimer = null;
+}
+
+async function pollMedia() {
+  const info = await mediaExec('poll', SPEED_LEVELS[speedIdx]);
+  if (!info) {
+    els.timeRemaining.textContent = '';
+    return;
+  }
+  const rate = Number(info.r) > 0 ? Number(info.r) : 1;
+  const left = formatTime((Number(info.d) - Number(info.t)) / rate);
+  els.timeRemaining.textContent = left ? `${left} left` : '';
+}
+
+function initMediaWatch() {
+  els.webview.addEventListener('media-started-playing', () => setMediaPlaying(true));
+  els.webview.addEventListener('media-paused', () => setMediaPlaying(false));
+}
+
+// ============================================================
+// Playback speed
+// ============================================================
+
+function applySpeed() {
+  const r = SPEED_LEVELS[speedIdx];
+  els.speedLevel.textContent = `${r.toFixed(2)}×`;
+  els.speedDownBtn.disabled = speedIdx === 0;
+  els.speedUpBtn.disabled = speedIdx === SPEED_LEVELS.length - 1;
+  localStorage.setItem('speedIdx', String(speedIdx));
+
+  // Push now rather than waiting for the next poll tick.
+  mediaExec('poll', r);
+
+  // The alignment search window (AlignmentEngine.js:77) and the scroll drift
+  // are both WALL-CLOCK based, but at 1.25x the transcript advances 25% faster
+  // per real second. Scale both so higher speed doesn't degrade sync.
+  window.api.setPlaybackRate(r);
+  if (scrollController) {
+    scrollController.updateTuning({ baselineVelocity: baseBaselineVelocity * r });
   }
 }
 
-function onStop() {
-  window.api.listenStop();
-  state.isListening = false;
-  els.listenBtn.disabled = false;
-  els.stopBtn.disabled = true;
-  if (scrollController) scrollController.pauseIndefinitely();
-  pauseWebviewMedia().then((wasPlaying) => {
-    state.audioWasPaused = wasPlaying;
-  });
+function initSpeed() {
+  speedIdx = readLevelIndex(localStorage.getItem('speedIdx'), SPEED_LEVELS.length, 0);
+  applySpeed();
 }
 
-// Pause the first playing <audio>/<video> in the embedded site and tag it so
-// we can resume it later. Returns true if something was paused.
-async function pauseWebviewMedia() {
-  if (!els.webview) return false;
-  const code = `
-    (function () {
-      const m = Array.from(document.querySelectorAll('audio, video'))
-        .find((el) => !el.paused && !el.ended);
-      if (!m) return false;
-      m.setAttribute('data-gms-paused', '1');
-      try { m.pause(); } catch (_) {}
-      return true;
-    })();
-  `;
-  try { return await els.webview.executeJavaScript(code); }
-  catch (_) { return false; }
-}
-
-async function resumeWebviewMedia() {
-  if (!els.webview) return;
-  const code = `
-    (function () {
-      const m = document.querySelector('audio[data-gms-paused="1"], video[data-gms-paused="1"]');
-      if (!m) return false;
-      m.removeAttribute('data-gms-paused');
-      try { const p = m.play(); if (p && typeof p.catch === 'function') p.catch(() => {}); } catch (_) {}
-      return true;
-    })();
-  `;
-  try { await els.webview.executeJavaScript(code); }
-  catch (_) { /* ignore */ }
+function stepSpeed(delta) {
+  const next = stepLevel(SPEED_LEVELS.length, speedIdx, delta);
+  if (next === speedIdx) return;
+  speedIdx = next;
+  applySpeed();
 }
 
 function renderParagraphs(paragraphs, title, units) {
-  if (title) {
-    els.transcriptTitle.textContent = title;
-    els.transcriptTitle.hidden = false;
-  } else {
-    els.transcriptTitle.textContent = '';
-    els.transcriptTitle.hidden = true;
-  }
+  // The bar is permanent — it carries the transport controls — so a PDF with
+  // no detectable title just leaves the centre text empty.
+  els.transcriptTitleText.textContent = title || '';
   const hasSpeakers = paragraphs.some((p) => p && p.speaker);
   document.body.classList.toggle('has-speakers', hasSpeakers);
   els.transcript.innerHTML = '';
@@ -523,7 +691,14 @@ function renderParagraphs(paragraphs, title, units) {
 
   els.transcriptEmpty.hidden = paragraphs.length > 0;
   els.documentPage.hidden = paragraphs.length === 0;
-  els.paragraphCount.textContent = `${paragraphs.length} paragraphs`;
+  els.diagParagraphs.textContent = `${paragraphs.length}`;
+
+  // Re-evaluate playback state against the newly loaded transcript. The normal
+  // flow is: press play (media-started-playing fires, but hasTranscript is
+  // false so nothing starts) THEN click Load Transcript. Replaying the
+  // event-derived flag here starts listening without a separate DOM probe.
+  state.hasTranscript = state.units.length > 0;
+  setMediaPlaying(state.mediaPlaying);
 
   // A freshly loaded document always starts at the top. The main process
   // emits position:update(0) BEFORE pdf:loaded, so any scroll target computed
@@ -602,24 +777,11 @@ function setWindowRange(from, to) {
 
 function onMatchState(payload) {
   if (!payload || typeof payload !== 'object') return;
-  const { matched, score, window: win } = payload;
+  const { window: win } = payload;
 
   if (win) setWindowRange(win.from, win.to);
-
-  if (!state.showMatchDetails) {
-    els.matchInfo.hidden = true;
-    return;
-  }
-  els.matchInfo.hidden = false;
-  if (win && win.recovery) {
-    els.matchInfo.textContent = matched
-      ? `re-synced · score ${score.toFixed(2)}`
-      : `re-searching ${win.from}–${win.to}…`;
-  } else if (matched) {
-    els.matchInfo.textContent = `match ${score.toFixed(2)} · window ${win ? `${win.from}–${win.to}` : '—'}`;
-  } else {
-    els.matchInfo.textContent = `no match · window ${win ? `${win.from}–${win.to}` : '—'}`;
-  }
+  // The numeric readout moved to the diagnostics panel (main.js keeps
+  // diag.lastMatch up to date); the in-transcript highlighting stays here.
 }
 
 function applyShowMatchDetails(enabled) {
@@ -627,14 +789,34 @@ function applyShowMatchDetails(enabled) {
   document.body.classList.toggle('show-match-details', state.showMatchDetails);
   if (!state.showMatchDetails) {
     setWindowRange(null, null);
-    els.matchInfo.hidden = true;
   }
   updateMatchHighlight();
 }
 
+// Healthy states render as a bare coloured dot; only 'lost' carries visible
+// text, and that text persists until the state changes. main.js sends real
+// setup failures through here ("No audio captured — check FFmpeg setup",
+// "Load a PDF first") and with the Listen button gone this is their only
+// surface in the UI.
 function updateStatus(message, s) {
-  els.status.textContent = message || '';
+  const msg = message || '';
   if (s) els.status.dataset.state = s;
+  const isError = (s || els.status.dataset.state) === 'lost';
+  els.status.textContent = isError ? msg : '';
+  els.status.title = msg || 'Pipeline state';
+  if (els.diagStatus) els.diagStatus.textContent = msg || '—';
+}
+
+// Whisper's cold start is slow — first run downloads ~500MB and loading the
+// model takes ~30s. Without this, pressing play looks like nothing happening.
+function updateWhisperHint(whisperState) {
+  if (!whisperState || els.status.dataset.state === 'lost') return;
+  if (/loading|starting/i.test(whisperState)) {
+    els.status.textContent = whisperState;
+    els.status.title = whisperState;
+  } else if (els.status.textContent) {
+    els.status.textContent = '';
+  }
 }
 
 // ============================================================
@@ -650,12 +832,11 @@ function applyZoom() {
   localStorage.setItem('zoomIdx', String(zoomIdx));
 }
 function initZoom() {
-  const saved = parseInt(localStorage.getItem('zoomIdx'), 10);
-  if (!Number.isNaN(saved) && saved >= 0 && saved < ZOOM_LEVELS.length) zoomIdx = saved;
+  zoomIdx = readLevelIndex(localStorage.getItem('zoomIdx'), ZOOM_LEVELS.length, ZOOM_LEVELS.indexOf(1.0));
   applyZoom();
 }
 function stepZoom(delta) {
-  const next = Math.max(0, Math.min(ZOOM_LEVELS.length - 1, zoomIdx + delta));
+  const next = stepLevel(ZOOM_LEVELS.length, zoomIdx, delta);
   if (next === zoomIdx) return;
   zoomIdx = next;
   applyZoom();
@@ -709,8 +890,10 @@ function initTabs() {
   els.tabs.forEach((tab) => {
     tab.addEventListener('click', () => activateTab(tab.dataset.tab));
   });
-  const saved = localStorage.getItem('activeTab') || 'transcript';
-  activateTab(saved);
+  // Always land on Browser at startup: no transcript is loaded yet, and with
+  // Load PDF gone the Browser tab is the only way to load one. main.js sends
+  // tab:activate('transcript') once a download completes.
+  activateTab('browser');
 }
 
 function activateTab(name) {
@@ -723,6 +906,10 @@ function activateTab(name) {
   Object.entries(els.tabPanels).forEach(([k, panel]) => {
     panel.classList.toggle('active', k === name);
   });
+
+  // The Browser tab has no title bar, so it has no fullscreen button — this
+  // class is what reveals the floating exit pill there (styles.css).
+  document.body.classList.toggle('tab-browser', name === 'browser');
 
   localStorage.setItem('activeTab', name);
 
@@ -763,7 +950,8 @@ async function openSettings() {
       els.settingsWhisperModel.value = s.whisperModel || 'small';
       els.settingsShowMatch.checked = s.showMatchDetails !== false;
       els.settingsFuseThreshold.value = s.fuseThreshold ?? 0.35;
-      els.settingsParagraphsPerSec.value = s.alignmentParagraphsPerSecond ?? 1.0;
+      els.settingsExpansionRate.value = s.windowExpansionRate ?? 1.0;
+      els.settingsShowDiagnostics.checked = s.showDiagnostics === true;
       els.settingsScrollGain.value = s.scrollGain ?? SCROLL_GAIN_DEFAULT;
       els.settingsScrollBaseline.value = s.scrollBaselineVelocity ?? SCROLL_BASELINE_V_DEFAULT;
       els.settingsScrollMax.value = s.scrollMaxVelocity ?? SCROLL_MAX_V_DEFAULT;
@@ -771,6 +959,13 @@ async function openSettings() {
     }
   } catch (_) {
     // ignore
+  }
+
+  try {
+    const version = await window.api.getVersion();
+    els.settingsVersion.textContent = version ? `Version ${version}` : '';
+  } catch (_) {
+    els.settingsVersion.textContent = '';
   }
 
   els.settingsDialog.showModal();
@@ -794,7 +989,8 @@ async function onSaveSettings() {
     whisperModel: els.settingsWhisperModel.value,
     showMatchDetails: els.settingsShowMatch.checked,
     fuseThreshold: parseFloat(els.settingsFuseThreshold.value),
-    alignmentParagraphsPerSecond: parseFloat(els.settingsParagraphsPerSec.value),
+    windowExpansionRate: parseFloat(els.settingsExpansionRate.value),
+    showDiagnostics: els.settingsShowDiagnostics.checked,
     scrollGain: parseFloat(els.settingsScrollGain.value),
     scrollBaselineVelocity: parseFloat(els.settingsScrollBaseline.value),
     scrollMaxVelocity: parseFloat(els.settingsScrollMax.value),
@@ -808,14 +1004,17 @@ async function onSaveSettings() {
 
   // Apply runtime changes immediately
   if (settingsResult.settings) {
+    baseBaselineVelocity = settingsResult.settings.scrollBaselineVelocity;
     if (scrollController) {
       scrollController.updateTuning({
         gain: settingsResult.settings.scrollGain,
         maxVelocity: settingsResult.settings.scrollMaxVelocity,
-        baselineVelocity: settingsResult.settings.scrollBaselineVelocity,
+        // Wall-clock drift, so it tracks playback speed. See applySpeed().
+        baselineVelocity: baseBaselineVelocity * SPEED_LEVELS[speedIdx],
       });
     }
     applyShowMatchDetails(settingsResult.settings.showMatchDetails);
+    setDiagnosticsVisible(settingsResult.settings.showDiagnostics === true);
   }
 
   els.settingsDialog.close();
@@ -983,27 +1182,36 @@ async function refreshDiagnostics() {
   }
 }
 
+// Sole owner of both the panel's hidden flag and its refresh timer, so the
+// Settings checkbox, the panel's close button and the startup apply all go
+// through one path.
+function setDiagnosticsVisible(show) {
+  els.diagPanel.hidden = !show;
+  if (show) {
+    refreshDiagnostics();
+    if (!diagRefreshTimer) diagRefreshTimer = setInterval(refreshDiagnostics, 2000);
+  } else if (diagRefreshTimer) {
+    clearInterval(diagRefreshTimer);
+    diagRefreshTimer = null;
+  }
+}
+
 function initDiagnostics() {
-  els.diagBtn.addEventListener('click', () => {
-    const show = els.diagPanel.hidden;
-    els.diagPanel.hidden = !show;
-    if (show) {
-      refreshDiagnostics();
-      diagRefreshTimer = setInterval(refreshDiagnostics, 2000);
-    } else if (diagRefreshTimer) {
-      clearInterval(diagRefreshTimer);
-      diagRefreshTimer = null;
-    }
-  });
-  els.diagClose.addEventListener('click', () => {
-    els.diagPanel.hidden = true;
-    if (diagRefreshTimer) {
-      clearInterval(diagRefreshTimer);
-      diagRefreshTimer = null;
+  els.diagClose.addEventListener('click', async () => {
+    setDiagnosticsVisible(false);
+    // Persist the preference. Read the full settings first — settings:save
+    // falls back to hardcoded defaults (not stored values) for any key the
+    // payload omits, so a partial write would silently reset your tuning.
+    try {
+      const current = await window.api.getSettings();
+      if (current) await window.api.saveSettings({ ...current, showDiagnostics: false });
+    } catch (_) {
+      // Session-only hide is an acceptable fallback.
     }
   });
   // Live counter updates while listening (cheap — panel may be closed).
   window.api.onDiagUpdate((d) => {
+    updateWhisperHint(d && d.whisperState);
     if (!els.diagPanel.hidden) renderDiagnostics(d);
   });
 }

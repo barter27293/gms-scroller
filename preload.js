@@ -3,6 +3,13 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('api', {
   pickPdf: () => ipcRenderer.invoke('pdf:pick'),
   loadPdf: (filePath) => ipcRenderer.invoke('pdf:load', filePath),
+  getVersion: () => ipcRenderer.invoke('app:get-version'),
+
+  // Auto-listen: the renderer owns the webview media events, main owns
+  // process lifecycle and the capture gate.
+  setMediaPlaying: (playing) => ipcRenderer.send('media:playing', playing),
+  setPlaybackRate: (rate) => ipcRenderer.send('media:rate', rate),
+
   listenStart: () => ipcRenderer.send('listen:start'),
   listenStop: () => ipcRenderer.send('listen:stop'),
   resync: (index) => ipcRenderer.send('align:resync', index),

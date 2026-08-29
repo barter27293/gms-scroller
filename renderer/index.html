@@ -10,39 +10,53 @@
 <body>
   <div id="app">
     <header id="toolbar">
-      <button id="btn-load-pdf">Load PDF</button>
-      <button id="btn-listen">● Listen</button>
-      <button id="btn-stop" disabled>▐▐ Pause</button>
-
       <nav id="tabs" role="tablist">
-        <button class="tab active" data-tab="transcript" role="tab">Transcript</button>
         <button class="tab" data-tab="browser" role="tab">Browser</button>
+        <button class="tab active" data-tab="transcript" role="tab">Transcript</button>
       </nav>
 
-      <div id="zoom-controls" aria-label="Text zoom">
-        <button id="btn-zoom-out" title="Zoom out">−</button>
-        <span id="zoom-level">100%</span>
-        <button id="btn-zoom-in" title="Zoom in">+</button>
-      </div>
-
-      <span id="status" data-state="idle">Idle</span>
-      <span id="match-info" title="Last match score and current search window" hidden></span>
-      <span id="paragraph-count"></span>
-
-      <button id="btn-diagnostics" title="Show diagnostics">Diagnostics</button>
-      <button id="btn-fullscreen" title="Toggle fullscreen (F11)">⛶ Fullscreen</button>
       <button id="btn-settings" title="Settings">Settings</button>
     </header>
 
-    <button id="btn-fullscreen-exit" type="button" title="Exit fullscreen (Esc)">⛶ Exit fullscreen</button>
+    <button id="btn-fullscreen-exit" type="button" title="Exit fullscreen (F11)">⛶ Exit fullscreen</button>
 
     <main id="content">
       <section id="tab-transcript" class="tab-panel active" role="tabpanel">
-        <header id="transcript-title" hidden></header>
+        <header id="transcript-title">
+          <div class="title-left">
+            <button id="btn-stop" disabled>▐▐ Pause</button>
+
+            <div class="control-group">
+              <span class="control-label" id="zoom-label">Zoom</span>
+              <div id="zoom-controls" role="group" aria-labelledby="zoom-label">
+                <button id="btn-zoom-out" title="Zoom out">−</button>
+                <span id="zoom-level">100%</span>
+                <button id="btn-zoom-in" title="Zoom in">+</button>
+              </div>
+            </div>
+
+            <div class="control-group">
+              <span class="control-label" id="speed-label">Speed</span>
+              <div id="speed-controls" role="group" aria-labelledby="speed-label">
+                <button id="btn-speed-down" title="Slower">−</button>
+                <span id="speed-level">1.00×</span>
+                <button id="btn-speed-up" title="Faster">+</button>
+              </div>
+            </div>
+          </div>
+
+          <span id="transcript-title-text"></span>
+
+          <div class="title-right">
+            <span id="time-remaining"></span>
+            <span id="status" data-state="idle" title="Pipeline state"></span>
+            <button id="btn-fullscreen" title="Toggle fullscreen (F11)">⛶ Fullscreen</button>
+          </div>
+        </header>
         <div id="scroll-area">
           <div id="transcript-empty" class="placeholder">
             <h2>No transcript loaded</h2>
-            <p>Click <strong>Load PDF</strong> to pick a transcript.</p>
+            <p>Open the <strong>Browser</strong> tab and click <strong>Load Transcript</strong> on the site.</p>
           </div>
           <article id="document-page" hidden>
             <div id="transcript"></div>
@@ -105,8 +119,8 @@
           </label>
 
           <label>
-            <span>Window expansion rate <em>(segments/sec; 0.1–5.0)</em></span>
-            <input type="number" id="settings-paragraphs-per-sec" min="0.1" max="5.0" step="0.1" />
+            <span>Window expansion rate <em>(higher = the search window grows faster while unmatched; 0.1–20)</em></span>
+            <input type="number" id="settings-expansion-rate" min="0.1" max="20" step="0.1" />
           </label>
 
           <label class="checkbox-label">
@@ -138,6 +152,11 @@
         <fieldset>
           <legend>Advanced</legend>
           <label class="checkbox-label">
+            <input type="checkbox" id="settings-show-diagnostics" />
+            <span>Show diagnostics panel <em>(live audio, Whisper and match state)</em></span>
+          </label>
+
+          <label class="checkbox-label">
             <input type="checkbox" id="settings-verbose-logging" />
             <span>Verbose PDF parser logging <em>(full speakers map + rejected rows)</em></span>
           </label>
@@ -145,6 +164,7 @@
 
         <div class="dialog-actions">
           <button type="button" id="settings-clear">Clear saved</button>
+          <span id="settings-version" class="hint"></span>
           <span style="flex: 1;"></span>
           <button type="button" id="settings-cancel">Cancel</button>
           <button type="button" id="settings-save" class="primary">Save</button>
@@ -158,6 +178,8 @@
         <button id="diag-close" title="Close">✕</button>
       </header>
       <div id="diag-grid">
+        <div><span class="diag-label">Status</span><span id="diag-status">—</span></div>
+        <div><span class="diag-label">Paragraphs</span><span id="diag-paragraphs">—</span></div>
         <div><span class="diag-label">Audio device</span><span id="diag-audio-device">—</span></div>
         <div><span class="diag-label">FFmpeg</span><span id="diag-ffmpeg">—</span></div>
         <div><span class="diag-label">Python</span><span id="diag-python">—</span></div>
@@ -193,6 +215,7 @@
     </dialog>
   </div>
 
+  <script src="helpers.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

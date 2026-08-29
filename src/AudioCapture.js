@@ -87,14 +87,34 @@ class AudioCapture extends EventEmitter {
     this.overlapBytes = SAMPLE_RATE * overlapSeconds * BYTES_PER_SAMPLE;
     this.proc = null;
     this.buffer = Buffer.alloc(0);
+    // Set by stop() so an in-flight start() can bail before spawning. See the
+    // race diagram above start().
+    this.aborted = false;
   }
 
+  // start() is async and this.proc stays null across the awaited device
+  // enumeration, so the `if (this.proc) return` guard below and stop()'s
+  // `if (!this.proc) return` guard BOTH pass during that window:
+  //
+  //   start() ─▶ proc === null ─▶ await listDshowAudioDevices() ─▶ _spawnFFmpeg()
+  //              (guard passes)     (spawns a 2nd ffmpeg, 1–3s)      (would run
+  //                    ▲                      │                       regardless)
+  //                    │              stop() lands here
+  //                    │                      │
+  //                    └──────────────────────┘
+  //                       stop() early-returns on null proc → NO-OP
+  //                       result without the flag: orphan ffmpeg holding the
+  //                       audio device with nobody consuming its stdout.
+  //
+  // The `aborted` flag closes that window.
   async start() {
     if (this.proc) return;
+    this.aborted = false;
     this.buffer = Buffer.alloc(0);
 
     this.emit('info', 'Enumerating DirectShow audio devices…');
     const devices = await listDshowAudioDevices(this.ffmpegCmd);
+    if (this.aborted) return;
 
     if (devices.length === 0) {
       this.emit(
@@ -181,6 +201,9 @@ class AudioCapture extends EventEmitter {
   }
 
   stop() {
+    // Raised before the early return so a start() still awaiting device
+    // enumeration sees it and skips _spawnFFmpeg.
+    this.aborted = true;
     if (!this.proc) return;
     try {
       this.proc.kill('SIGTERM');

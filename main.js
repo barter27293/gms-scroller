@@ -29,6 +29,8 @@ const { WhisperBridge } = require('./src/WhisperBridge');
 const { AlignmentEngine } = require('./src/AlignmentEngine');
 const { initAutoUpdater, downloadUpdate, quitAndInstall } = require('./src/Updater');
 const Paths = require('./src/Paths');
+const Settings = require('./src/settings');
+const { buildUnits } = require('./src/buildUnits');
 const FileLog = require('./src/FileLog');
 
 // Tee console output into <userData>/logs/main.log — packaged builds have no
@@ -46,7 +48,12 @@ const DEFAULTS = {
   showMatchDetails: true,
   // Advanced — tuning previously hardcoded in source.
   verboseLogging: false,
-  alignmentParagraphsPerSecond: 1.0,
+  showDiagnostics: false,
+  // NOTE: `alignmentParagraphsPerSecond` is deliberately ABSENT. `conf` merges
+  // and persists the defaults object on construction, so any key listed here
+  // reads back as a real value forever — absence would stop being a signal and
+  // the migration below could not tell "never set" from "set to the default".
+  windowExpansionRate: Settings.EXPANSION_DEFAULT,
   scrollGain: 0.35,
   scrollMaxVelocity: 90,
   scrollBaselineVelocity: 8,
@@ -54,11 +61,36 @@ const DEFAULTS = {
 
 const store = new Store({ defaults: DEFAULTS });
 
+// One-shot rescale of the window expansion rate (×10). The legacy key was
+// tuned in a range where useful values clustered near the 0.1 floor; the new
+// scale puts the working value at 1. Behaviour-preserving: the engine still
+// receives `windowExpansionRate / 10`.
+if (store.get('settingsScaleVersion') !== 2) {
+  const migrated = Settings.migrateExpansionRate(store.get('alignmentParagraphsPerSecond'));
+  if (migrated !== null) {
+    console.log(`[Settings] migrating alignmentParagraphsPerSecond=${store.get('alignmentParagraphsPerSecond')} -> windowExpansionRate=${migrated}`);
+    store.set('windowExpansionRate', migrated);
+  }
+  store.set('settingsScaleVersion', 2);
+}
+
 let mainWindow = null;
 let audio = null;
 let whisper = null;
 let alignment = null;
 let watchdogTimer = null;
+
+// ---- Media-driven capture gating ----
+// Auto-listen is driven by the webview's media events. Pausing must NOT tear
+// the pipeline down: AudioCapture.start() spawns a throwaway ffmpeg to
+// enumerate dshow devices (1–3s) and needs 8s of PCM before its first chunk,
+// so restart-per-pause would cost a transcription every time you scrub.
+// Instead the chunk handler is gated on `capturing`, and a 5-minute idle
+// reaper reclaims both processes if playback never resumes.
+let capturing = false;
+let idleReaperTimer = null;
+let playbackRate = 1;
+const IDLE_REAP_MS = 5 * 60 * 1000;
 
 function sendStatus(message, state) {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -91,49 +123,6 @@ function sendDiag() {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('diag:update', diagSnapshot(false));
   }
-}
-
-// Group each paragraph's sentences into alignment units of roughly one STT
-// chunk's worth of words. Each unit remembers which paragraph and sentence
-// range it covers so the renderer can highlight and scroll to sentences.
-const MIN_UNIT_WORDS = 12;
-const MAX_UNIT_WORDS = 40;
-
-function buildUnits(paragraphs) {
-  const units = [];
-  paragraphs.forEach((p, para) => {
-    const sentences =
-      Array.isArray(p.sentences) && p.sentences.length > 0
-        ? p.sentences
-        : [p.alignText || p.text];
-    let start = 0;
-    let words = 0;
-    let texts = [];
-    const flush = (end) => {
-      if (texts.length > 0) {
-        units.push({ text: texts.join(' '), para, sentStart: start, sentEnd: end });
-      }
-    };
-    for (let s = 0; s < sentences.length; s++) {
-      const w = sentences[s].split(/\s+/).filter(Boolean).length;
-      if (words > 0 && words + w > MAX_UNIT_WORDS) {
-        flush(s - 1);
-        start = s;
-        words = 0;
-        texts = [];
-      }
-      texts.push(sentences[s]);
-      words += w;
-      if (words >= MIN_UNIT_WORDS) {
-        flush(s);
-        start = s + 1;
-        words = 0;
-        texts = [];
-      }
-    }
-    flush(sentences.length - 1);
-  });
-  return units;
 }
 
 async function loadPdfFromPath(filePath) {
@@ -247,7 +236,7 @@ function createWindow() {
 function initPipeline() {
   alignment = new AlignmentEngine({
     threshold: store.get('fuseThreshold'),
-    unitsPerSecond: store.get('alignmentParagraphsPerSecond'),
+    unitsPerSecond: Settings.effectiveUnitsPerSecond(store.get('windowExpansionRate'), playbackRate),
   });
   alignment.on('position-update', (payload) => {
     console.log(
@@ -318,6 +307,9 @@ function startListening() {
   if (watchdogTimer) clearInterval(watchdogTimer);
   watchdogTimer = setInterval(() => {
     if (!audio) return;
+    // Only judge the pipeline while we are actually feeding Whisper — a long
+    // pause would otherwise trip the "chunks but no transcriptions" warning.
+    if (!capturing) return;
     const elapsed = Math.round((Date.now() - startedAt) / 1000);
     if (chunkCount === 0 && elapsed >= 15) {
       console.warn(`[Pipeline] WARNING: ${elapsed}s elapsed and zero audio chunks received.`);
@@ -342,7 +334,8 @@ function startListening() {
       console.log(`[Audio] chunk #${chunkCount} (${buf.length} bytes)`);
       sendDiag();
     }
-    if (whisper) whisper.send(buf);
+    // Gate, do not tear down. See the `capturing` comment near the top.
+    if (capturing && whisper) whisper.send(buf);
   });
   audio.on('info', (msg) => {
     console.log(`[Audio] ${msg}`);
@@ -390,6 +383,8 @@ function startListening() {
 }
 
 function stopListening() {
+  cancelIdleReaper();
+  capturing = false;
   if (watchdogTimer) {
     clearInterval(watchdogTimer);
     watchdogTimer = null;
@@ -408,6 +403,53 @@ function stopListening() {
   sendStatus('Idle', 'idle');
 }
 
+function cancelIdleReaper() {
+  if (idleReaperTimer) {
+    clearTimeout(idleReaperTimer);
+    idleReaperTimer = null;
+  }
+}
+
+function startIdleReaper() {
+  cancelIdleReaper();
+  idleReaperTimer = setTimeout(() => {
+    idleReaperTimer = null;
+    if (capturing) return; // resumed under us
+    console.log('[Pipeline] idle for 5 min — reclaiming ffmpeg + whisper');
+    stopListening();
+  }, IDLE_REAP_MS);
+}
+
+// Single entry point for webview media state. The renderer owns the events;
+// main owns process lifecycle.
+function setMediaPlaying(playing) {
+  if (playing) {
+    cancelIdleReaper();
+    capturing = true;
+    if (!audio && !whisper) {
+      startListening();
+    } else {
+      sendStatus('Listening…', 'listening');
+    }
+  } else {
+    if (!capturing) return;
+    capturing = false;
+    console.log('[Pipeline] media paused — gating chunks, pipeline stays warm');
+    sendStatus('Paused', 'idle');
+    startIdleReaper();
+  }
+}
+
+function applyPlaybackRate(rate) {
+  const n = Number(rate);
+  playbackRate = Number.isFinite(n) && n > 0 ? n : 1;
+  if (alignment) {
+    alignment.setUnitsPerSecond(
+      Settings.effectiveUnitsPerSecond(store.get('windowExpansionRate'), playbackRate)
+    );
+  }
+}
+
 function registerIpc() {
   ipcMain.handle('config:get', () => ({
     audioSiteUrl: store.get('audioSiteUrl'),
@@ -417,13 +459,17 @@ function registerIpc() {
     scrollMaxVelocity: store.get('scrollMaxVelocity'),
     scrollBaselineVelocity: store.get('scrollBaselineVelocity'),
     showMatchDetails: store.get('showMatchDetails'),
+    // init() reads config:get, not settings:get — keeping showDiagnostics here
+    // saves a second IPC round trip on every startup.
+    showDiagnostics: store.get('showDiagnostics'),
   }));
 
   ipcMain.handle('settings:get', () => ({
     whisperModel: store.get('whisperModel'),
     showMatchDetails: store.get('showMatchDetails'),
     fuseThreshold: store.get('fuseThreshold'),
-    alignmentParagraphsPerSecond: store.get('alignmentParagraphsPerSecond'),
+    windowExpansionRate: store.get('windowExpansionRate'),
+    showDiagnostics: store.get('showDiagnostics'),
     scrollGain: store.get('scrollGain'),
     scrollMaxVelocity: store.get('scrollMaxVelocity'),
     scrollBaselineVelocity: store.get('scrollBaselineVelocity'),
@@ -444,7 +490,12 @@ function registerIpc() {
         : store.get('whisperModel'),
       showMatchDetails: payload.showMatchDetails !== false,
       fuseThreshold: clamp(numOrDefault(payload.fuseThreshold, 0.35), 0.1, 0.8),
-      alignmentParagraphsPerSecond: clamp(numOrDefault(payload.alignmentParagraphsPerSecond, 1.0), 0.1, 5.0),
+      windowExpansionRate: clamp(
+        numOrDefault(payload.windowExpansionRate, Settings.EXPANSION_DEFAULT),
+        Settings.EXPANSION_MIN,
+        Settings.EXPANSION_MAX
+      ),
+      showDiagnostics: payload.showDiagnostics === true,
       scrollGain: clamp(numOrDefault(payload.scrollGain, 0.35), 0.05, 2.0),
       scrollMaxVelocity: clamp(numOrDefault(payload.scrollMaxVelocity, 90), 20, 400),
       scrollBaselineVelocity: clamp(numOrDefault(payload.scrollBaselineVelocity, 8), 0, 60),
@@ -456,7 +507,9 @@ function registerIpc() {
     // Apply runtime changes where possible
     if (alignment) {
       alignment.setThreshold(next.fuseThreshold);
-      alignment.setUnitsPerSecond(next.alignmentParagraphsPerSecond);
+      alignment.setUnitsPerSecond(
+        Settings.effectiveUnitsPerSecond(next.windowExpansionRate, playbackRate)
+      );
     }
 
     return { ok: true, settings: next };
@@ -473,6 +526,12 @@ function registerIpc() {
   });
 
   ipcMain.handle('pdf:load', async (_, filePath) => loadPdfFromPath(filePath));
+
+  ipcMain.handle('app:get-version', () => app.getVersion());
+
+  // Webview media state drives capture gating (see setMediaPlaying).
+  ipcMain.on('media:playing', (_, playing) => setMediaPlaying(playing === true));
+  ipcMain.on('media:rate', (_, rate) => applyPlaybackRate(rate));
 
   ipcMain.on('listen:start', () => startListening());
   ipcMain.on('listen:stop', () => stopListening());

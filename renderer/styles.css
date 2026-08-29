@@ -68,7 +68,8 @@ html, body {
   flex-wrap: wrap;
 }
 
-#toolbar button {
+#toolbar button,
+#transcript-title button {
   background: var(--button-bg);
   color: var(--fg);
   border: 1px solid var(--button-border);
@@ -78,12 +79,13 @@ html, body {
   cursor: pointer;
   transition: background 0.15s, border-color 0.15s;
 }
-#toolbar button:hover:not(:disabled) { background: var(--button-bg-hover); }
-#toolbar button:disabled { opacity: 0.4; cursor: not-allowed; }
+#toolbar button:hover:not(:disabled),
+#transcript-title button:hover:not(:disabled) { background: var(--button-bg-hover); }
+#toolbar button:disabled,
+#transcript-title button:disabled { opacity: 0.4; cursor: not-allowed; }
 
 #tabs {
   display: flex;
-  margin-left: 12px;
   border: 1px solid var(--button-border);
   border-radius: 4px;
   overflow: hidden;
@@ -103,17 +105,19 @@ html, body {
   color: #fff;
 }
 
-#zoom-controls {
+
+#zoom-controls,
+#speed-controls {
   display: flex;
   align-items: center;
   gap: 4px;
-  margin-left: 12px;
   border: 1px solid var(--button-border);
   border-radius: 4px;
   padding: 0;
   overflow: hidden;
 }
-#zoom-controls button {
+#zoom-controls button,
+#speed-controls button {
   border: none;
   border-radius: 0;
   background: transparent;
@@ -122,24 +126,34 @@ html, body {
   width: 28px;
   padding: 4px 0;
 }
-#zoom-level {
+#zoom-level,
+#speed-level {
   font-size: 12px;
   color: var(--fg-muted);
   font-variant-numeric: tabular-nums;
   min-width: 44px;
   text-align: center;
 }
+#speed-level { min-width: 48px; }
 
+/* Pipeline state. Idle/listening/synced render as a bare dot; only 'lost'
+   carries text, and that text persists until the state changes — main.js
+   sends real setup failures here ("No audio captured — check FFmpeg setup")
+   and with the Listen button gone this is the only place they surface. */
 #status {
-  margin-left: auto;
-  font-size: 13px;
+  font-size: 12px;
   color: var(--status-idle);
   display: flex;
   align-items: center;
   gap: 6px;
+  max-width: 40vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 #status::before {
   content: "";
+  flex: 0 0 auto;
   display: inline-block;
   width: 8px;
   height: 8px;
@@ -149,11 +163,6 @@ html, body {
 #status[data-state="listening"] { color: var(--status-listening); }
 #status[data-state="synced"]    { color: var(--status-synced); }
 #status[data-state="lost"]      { color: var(--status-lost); }
-
-#paragraph-count {
-  font-size: 12px;
-  color: var(--fg-muted);
-}
 
 /* ===== Content area + tab panels ===== */
 
@@ -173,17 +182,67 @@ html, body {
 
 /* ===== Transcript tab — document on grey background ===== */
 
+/* Three-zone bar. Always rendered, even with no detected title, because it
+   carries the transport controls:
+     [ Pause | zoom | speed ]        <title>        [ time left | state dot ]
+   It lives inside #tab-transcript, so body.fullscreen (which hides #toolbar)
+   leaves it visible — the controls stay reachable in fullscreen. */
 #transcript-title {
   flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
   background: var(--bg-elev);
   color: var(--fg);
   border-bottom: 1px solid var(--border);
-  padding: 10px 24px;
+  padding: 8px 16px;
   font-size: 14px;
-  font-weight: 600;
   letter-spacing: 0.02em;
-  text-align: center;
   user-select: none;
+}
+#transcript-title .title-left,
+#transcript-title .title-right {
+  display: flex;
+  align-items: center;
+  /* Wider than the 6px inside a control-group, so each label reads as
+     belonging to the pill on its right rather than floating between them. */
+  gap: 14px;
+  flex: 0 0 auto;
+}
+
+#transcript-title .control-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+#transcript-title .control-label {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+  user-select: none;
+  white-space: nowrap;
+}
+#transcript-title .title-right { justify-content: flex-end; }
+#transcript-title-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: center;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#btn-stop { min-width: 92px; }
+/* Sized for the longer "Exit fullscreen" label so the centred title does not
+   shift when the label swaps. */
+#btn-fullscreen { min-width: 132px; }
+#time-remaining {
+  font-size: 12px;
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 #scroll-area {
@@ -332,7 +391,12 @@ body.show-match-details #document-page #transcript .sentence.in-window {
 #btn-fullscreen-exit:hover { background: rgba(0, 0, 0, 0.75); }
 
 body.fullscreen #toolbar { display: none; }
-body.fullscreen #btn-fullscreen-exit { display: inline-block; }
+
+/* The transcript title bar carries its own fullscreen button and stays visible
+   in fullscreen, so the floating pill is only needed on the Browser tab —
+   where there is no title bar. Scoping it here also stops it overlapping the
+   status dot and time remaining in the title bar's right zone. */
+body.fullscreen.tab-browser #btn-fullscreen-exit { display: inline-block; }
 
 /* ===== Browser tab ===== */
 
