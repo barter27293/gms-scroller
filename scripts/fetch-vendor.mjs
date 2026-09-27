@@ -3,6 +3,11 @@
 //   vendor/ffmpeg/ffmpeg.exe   — FFmpeg essentials build (gyan.dev)
 //   vendor/python/             — Python embeddable runtime with faster-whisper
 //                                preinstalled via pip
+//   vendor/models/faster-whisper-small/
+//                              — the Whisper `small` model (CTranslate2), so the
+//                                installed app never downloads it. Networks with
+//                                TLS inspection (e.g. Streamline3) break the
+//                                runtime Hugging Face download.
 //
 // electron-builder ships these via extraResources (see package.json) so the
 // installed app needs neither FFmpeg nor Python on the user's machine.
@@ -127,10 +132,36 @@ async function fetchPython() {
   log(`python runtime ready: ${pyExe}`);
 }
 
+// Files faster-whisper needs to load the model fully offline. tokenizer.json
+// matters: without it faster-whisper fetches a tokenizer from the Hub.
+const MODEL_FILES = ['model.bin', 'config.json', 'tokenizer.json', 'vocabulary.txt'];
+
+async function fetchModel() {
+  const modelDir = path.join(VENDOR, 'models', 'faster-whisper-small');
+  if (MODEL_FILES.every((f) => fs.existsSync(path.join(modelDir, f)))) {
+    log('whisper small model already present — skipping');
+    return;
+  }
+  const pyExe = path.join(VENDOR, 'python', 'python.exe');
+  fs.mkdirSync(modelDir, { recursive: true });
+  // output_dir writes real files (not HF-cache symlinks) that electron-builder
+  // can copy as-is.
+  run(pyExe, [
+    '-c',
+    `from faster_whisper import download_model; download_model('small', output_dir=${JSON.stringify(modelDir)})`,
+  ]);
+  // huggingface_hub leaves download metadata here — not needed at runtime.
+  fs.rmSync(path.join(modelDir, '.cache'), { recursive: true, force: true });
+  const missing = MODEL_FILES.filter((f) => !fs.existsSync(path.join(modelDir, f)));
+  if (missing.length) throw new Error(`whisper model incomplete, missing: ${missing.join(', ')}`);
+  log(`whisper small model ready: ${modelDir}`);
+}
+
 try {
   fs.mkdirSync(TMP, { recursive: true });
   await fetchFfmpeg();
   await fetchPython();
+  await fetchModel();
   fs.rmSync(TMP, { recursive: true, force: true });
   log('done');
 } catch (err) {

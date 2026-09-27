@@ -86,7 +86,8 @@ ffmpeg -f wasapi -loopback -i default -ar 16000 -ac 1 -f s16le pipe:1
 
 ### WhisperBridge
 
-- Spawn `python python/whisper_worker.py` as child process
+- Spawn `python python/whisper_worker.py` as child process **at app launch** (`ensureWhisper()` in main.js). It stays resident for the app lifetime. Only ffmpeg is started and stopped with playback.
+- The model is always `small`, bundled at `vendor/models/faster-whisper-small` (fetched by `scripts/fetch-vendor.mjs`, shipped via extraResources to `resources/models/`). It is passed as `WHISPER_MODEL_PATH` with `HF_HUB_OFFLINE=1`. It is not user-configurable.
 - Write PCM Buffer chunks to stdin
 - Read lines from stdout as transcribed text strings
 - Emit `transcription` event with text string
@@ -127,7 +128,6 @@ ffmpeg -f wasapi -loopback -i default -ar 16000 -ac 1 -f s16le pipe:1
 ```json
 {
   "audioSiteUrl": "https://example.com/audio",
-  "whisperModel": "small",
   "chunkSeconds": 8,
   "overlapSeconds": 2,
   "fuseThreshold": 0.35,
@@ -150,7 +150,7 @@ npm run build
 
 - Windows-only in v1 (WASAPI loopback)
 - FFmpeg, Python + faster-whisper must be installed separately (document in README)
-- First run of Whisper downloads model (~500MB for small) — show progress to user
+- Whisper `small` model is bundled (installer ~+480 MB), never downloaded at runtime. TLS-inspecting filters (e.g. Streamline3) break Hugging Face downloads
 - If audio site blocks iframes/webviews, user may need to use `--disable-web-security` flag (dev only) or the site may need to be contacted
 
 ## Out of Scope (v1)

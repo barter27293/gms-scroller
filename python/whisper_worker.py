@@ -19,15 +19,21 @@ import numpy as np
 
 SAMPLE_RATE = 16000
 CHUNK_SECONDS = int(os.environ.get("WHISPER_CHUNK_SECONDS", "8"))
-MODEL_SIZE = os.environ.get("WHISPER_MODEL", "small")
+# Directory of the bundled `small` model (see scripts/fetch-vendor.mjs). When
+# unset — dev before fetch-vendor has run — fall back to downloading "small".
+MODEL_PATH = os.environ.get("WHISPER_MODEL_PATH", "")
 BYTES_PER_CHUNK = SAMPLE_RATE * CHUNK_SECONDS * 2  # 16-bit = 2 bytes
 
 
 def main() -> None:
-    sys.stderr.write(f"Loading faster-whisper model='{MODEL_SIZE}' (first run downloads ~500MB)…\n")
-    sys.stderr.flush()
-
-    model = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8")
+    if MODEL_PATH and os.path.isdir(MODEL_PATH):
+        sys.stderr.write(f"Loading bundled faster-whisper model 'small' from {MODEL_PATH}…\n")
+        sys.stderr.flush()
+        model = WhisperModel(MODEL_PATH, device="cpu", compute_type="int8", local_files_only=True)
+    else:
+        sys.stderr.write("Loading faster-whisper model 'small' (not bundled — downloading ~500MB on first run)…\n")
+        sys.stderr.flush()
+        model = WhisperModel("small", device="cpu", compute_type="int8")
 
     sys.stderr.write("Model ready. Listening for PCM chunks on stdin.\n")
     sys.stderr.flush()

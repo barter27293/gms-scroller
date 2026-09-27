@@ -32,7 +32,7 @@ npm install
 pip install faster-whisper
 ```
 
-First run of the listener downloads the Whisper `small` model (~500 MB). The status bar will show "Loading model…".
+For development, run `npm run fetch-vendor` once. It lays down the bundled FFmpeg, the Python runtime and the Whisper `small` model (~480 MB) in `vendor/`. The installer ships the same model, so nothing is downloaded at runtime. That matters on networks with TLS inspection, where a Hugging Face download fails. The model loads when the app starts, and the status bar shows "loading model…" until it is ready.
 
 ---
 
@@ -160,7 +160,6 @@ Configuration lives in `electron-store` (user data dir, JSON). Defaults:
 ```json
 {
   "audioSiteUrl": "https://globalmediastream.com/",
-  "whisperModel": "small",
   "chunkSeconds": 8,
   "overlapSeconds": 2,
   "fuseThreshold": 0.35,

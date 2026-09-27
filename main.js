@@ -39,7 +39,6 @@ FileLog.init(path.join(app.getPath('userData'), 'logs'));
 
 const DEFAULTS = {
   audioSiteUrl: 'https://globalmediastream.com/',
-  whisperModel: 'small',
   chunkSeconds: 8,
   overlapSeconds: 2,
   fuseThreshold: 0.35,
@@ -74,6 +73,11 @@ if (store.get('settingsScaleVersion') !== 2) {
   store.set('settingsScaleVersion', 2);
 }
 
+// The Whisper model is no longer user-selectable: `small` ships in the
+// installer. Drop the stale persisted choice (conf persisted the old default,
+// and some installs had `large-v3`, which cannot download behind TLS inspection).
+if (store.has('whisperModel')) store.delete('whisperModel');
+
 let mainWindow = null;
 let audio = null;
 let whisper = null;
@@ -86,11 +90,21 @@ let watchdogTimer = null;
 // enumerate dshow devices (1–3s) and needs 8s of PCM before its first chunk,
 // so restart-per-pause would cost a transcription every time you scrub.
 // Instead the chunk handler is gated on `capturing`, and a 5-minute idle
-// reaper reclaims both processes if playback never resumes.
+// reaper reclaims ffmpeg if playback never resumes.
+//
+// Whisper is separate: ensureWhisper() spawns the worker at app launch and it
+// stays resident for the app's lifetime. Python start-up + model load takes
+// several seconds, and paying that on first play cost the first 10–20s of
+// audio. Chunks sent before "Model ready" queue in the stdin pipe.
 let capturing = false;
 let idleReaperTimer = null;
 let playbackRate = 1;
 const IDLE_REAP_MS = 5 * 60 * 1000;
+
+// Per-listen-session counters, shared by the watchdog and the Whisper handlers.
+let chunkCount = 0;
+let transcriptionCount = 0;
+let listenStartedAt = 0;
 
 function sendStatus(message, state) {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -266,8 +280,72 @@ function initPipeline() {
   });
 }
 
+// Spawn the Whisper worker if it isn't running. Called at app launch (so the
+// model is loaded before the first play) and again from startListening() in
+// case the worker died. Never respawns on its own — a broken install would
+// otherwise crash-loop.
+function ensureWhisper() {
+  if (whisper) return;
+
+  const modelPath = Paths.whisperModelPath(app.isPackaged);
+  // The worker script must resolve OUTSIDE app.asar in packaged builds —
+  // python.exe cannot read files inside the asar archive.
+  whisper = new WhisperBridge({
+    modelPath,
+    workerPath: Paths.whisperWorkerPath(app.isPackaged),
+    pythonCmd: Paths.pythonCmd(app.isPackaged),
+  });
+  console.log(`[Whisper] starting worker: python=${Paths.pythonCmd(app.isPackaged)} worker=${Paths.whisperWorkerPath(app.isPackaged)} model=${modelPath || "'small' (not bundled — will download)"}`);
+
+  diag.whisperState = 'starting…';
+  sendDiag();
+
+  whisper.on('transcription', (text) => {
+    transcriptionCount++;
+    diag.transcriptions = transcriptionCount;
+    diag.lastText = text;
+    diag.whisperState = 'transcribing';
+    console.log(`[Whisper] #${transcriptionCount}: "${text}"`);
+    if (alignment) alignment.match(text);
+    sendStatus('Synced', 'synced');
+  });
+  whisper.on('info', (msg) => {
+    console.log(`[Whisper] ${msg}`);
+    if (/loading/i.test(msg)) diag.whisperState = 'loading model…';
+    else if (/model ready/i.test(msg)) diag.whisperState = 'ready';
+    if (msg.toLowerCase().includes('error')) {
+      diag.whisperState = `error: ${msg.slice(0, 120)}`;
+      sendStatus(msg, 'lost');
+    }
+    sendDiag();
+  });
+  whisper.on('error', (err) => {
+    console.error(`[Whisper] ERROR: ${err.message}`);
+    if (whisper) {
+      whisper.removeAllListeners();
+      whisper.stop();
+      whisper = null;
+    }
+    diag.whisperState = `error: ${err.message.slice(0, 120)}`;
+    sendDiag();
+    // Nothing to transcribe with, so stop capture too. Status goes last so
+    // stopListening()'s 'Idle' doesn't overwrite the error.
+    if (audio) stopListening();
+    sendStatus(`Whisper error: ${err.message}`, 'lost');
+  });
+
+  whisper.start();
+}
+
+function shutdownWhisper() {
+  if (!whisper) return;
+  whisper.removeAllListeners();
+  whisper.stop();
+  whisper = null;
+}
+
 function startListening() {
-  if (audio || whisper) return;
+  if (audio) return;
 
   if (alignment && alignment.units.length === 0) {
     console.warn('[Pipeline] Listen clicked but no PDF loaded — alignment will produce no matches.');
@@ -276,32 +354,27 @@ function startListening() {
   }
 
   console.log('[Pipeline] === Listen started ===');
-  console.log(`[Pipeline] config: chunkSeconds=${store.get('chunkSeconds')} overlapSeconds=${store.get('overlapSeconds')} model=${store.get('whisperModel')} fuseThreshold=${store.get('fuseThreshold')}`);
+  console.log(`[Pipeline] config: chunkSeconds=${store.get('chunkSeconds')} overlapSeconds=${store.get('overlapSeconds')} fuseThreshold=${store.get('fuseThreshold')}`);
+
+  // Normally already running since launch; respawns if it died.
+  ensureWhisper();
 
   audio = new AudioCapture({
     chunkSeconds: store.get('chunkSeconds'),
     overlapSeconds: store.get('overlapSeconds'),
     ffmpegCmd: Paths.ffmpegCmd(app.isPackaged),
   });
-  // The worker script must resolve OUTSIDE app.asar in packaged builds —
-  // python.exe cannot read files inside the asar archive.
-  whisper = new WhisperBridge({
-    model: store.get('whisperModel'),
-    workerPath: Paths.whisperWorkerPath(app.isPackaged),
-    pythonCmd: Paths.pythonCmd(app.isPackaged),
-  });
-  console.log(`[Pipeline] ffmpeg=${Paths.ffmpegCmd(app.isPackaged)} python=${Paths.pythonCmd(app.isPackaged)} worker=${Paths.whisperWorkerPath(app.isPackaged)}`);
+  console.log(`[Pipeline] ffmpeg=${Paths.ffmpegCmd(app.isPackaged)}`);
 
-  let chunkCount = 0;
-  let transcriptionCount = 0;
-  const startedAt = Date.now();
+  chunkCount = 0;
+  transcriptionCount = 0;
+  listenStartedAt = Date.now();
 
   diag.audioDevice = null;
   diag.chunks = 0;
   diag.transcriptions = 0;
   diag.lastText = null;
   diag.lastMatch = null;
-  diag.whisperState = 'starting…';
   sendDiag();
 
   if (watchdogTimer) clearInterval(watchdogTimer);
@@ -310,7 +383,7 @@ function startListening() {
     // Only judge the pipeline while we are actually feeding Whisper — a long
     // pause would otherwise trip the "chunks but no transcriptions" warning.
     if (!capturing) return;
-    const elapsed = Math.round((Date.now() - startedAt) / 1000);
+    const elapsed = Math.round((Date.now() - listenStartedAt) / 1000);
     if (chunkCount === 0 && elapsed >= 15) {
       console.warn(`[Pipeline] WARNING: ${elapsed}s elapsed and zero audio chunks received.`);
       console.warn('[Pipeline] FFmpeg is not capturing system audio. Most common cause on Windows:');
@@ -348,40 +421,16 @@ function startListening() {
   });
   audio.on('error', (err) => {
     console.error(`[Audio] ERROR: ${err.message}`);
+    stopListening();
     sendStatus(`Audio error: ${err.message}`, 'lost');
-    stopListening();
   });
 
-  whisper.on('transcription', (text) => {
-    transcriptionCount++;
-    diag.transcriptions = transcriptionCount;
-    diag.lastText = text;
-    diag.whisperState = 'transcribing';
-    console.log(`[Whisper] #${transcriptionCount}: "${text}"`);
-    if (alignment) alignment.match(text);
-    sendStatus('Synced', 'synced');
-  });
-  whisper.on('info', (msg) => {
-    console.log(`[Whisper] ${msg}`);
-    if (/loading/i.test(msg)) diag.whisperState = 'loading model…';
-    else if (/model ready/i.test(msg)) diag.whisperState = 'ready';
-    if (msg.toLowerCase().includes('error')) {
-      diag.whisperState = `error: ${msg.slice(0, 120)}`;
-      sendStatus(msg, 'lost');
-    }
-    sendDiag();
-  });
-  whisper.on('error', (err) => {
-    console.error(`[Whisper] ERROR: ${err.message}`);
-    sendStatus(`Whisper error: ${err.message}`, 'lost');
-    stopListening();
-  });
-
-  whisper.start();
   audio.start();
   sendStatus('Listening…', 'listening');
 }
 
+// Stops audio capture only — the Whisper worker stays resident (see
+// ensureWhisper). shutdownWhisper() handles it at app exit.
 function stopListening() {
   cancelIdleReaper();
   capturing = false;
@@ -393,11 +442,6 @@ function stopListening() {
     audio.removeAllListeners();
     audio.stop();
     audio = null;
-  }
-  if (whisper) {
-    whisper.removeAllListeners();
-    whisper.stop();
-    whisper = null;
   }
   console.log('[Pipeline] === Listen stopped ===');
   sendStatus('Idle', 'idle');
@@ -415,7 +459,7 @@ function startIdleReaper() {
   idleReaperTimer = setTimeout(() => {
     idleReaperTimer = null;
     if (capturing) return; // resumed under us
-    console.log('[Pipeline] idle for 5 min — reclaiming ffmpeg + whisper');
+    console.log('[Pipeline] idle for 5 min — reclaiming ffmpeg (whisper stays loaded)');
     stopListening();
   }, IDLE_REAP_MS);
 }
@@ -426,7 +470,7 @@ function setMediaPlaying(playing) {
   if (playing) {
     cancelIdleReaper();
     capturing = true;
-    if (!audio && !whisper) {
+    if (!audio) {
       startListening();
     } else {
       sendStatus('Listening…', 'listening');
@@ -465,7 +509,6 @@ function registerIpc() {
   }));
 
   ipcMain.handle('settings:get', () => ({
-    whisperModel: store.get('whisperModel'),
     showMatchDetails: store.get('showMatchDetails'),
     fuseThreshold: store.get('fuseThreshold'),
     windowExpansionRate: store.get('windowExpansionRate'),
@@ -482,12 +525,8 @@ function registerIpc() {
     }
     const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
     const numOrDefault = (v, fallback) => (Number.isFinite(Number(v)) ? Number(v) : fallback);
-    const WHISPER_MODELS = ['tiny', 'base', 'small', 'medium', 'large-v3'];
 
     const next = {
-      whisperModel: WHISPER_MODELS.includes(payload.whisperModel)
-        ? payload.whisperModel
-        : store.get('whisperModel'),
       showMatchDetails: payload.showMatchDetails !== false,
       fuseThreshold: clamp(numOrDefault(payload.fuseThreshold, 0.35), 0.1, 0.8),
       windowExpansionRate: clamp(
@@ -610,6 +649,9 @@ app.whenReady().then(() => {
   attachWebviewDownloadHandler();
   createWindow();
 
+  // Load the speech model now, not on first play — see ensureWhisper().
+  ensureWhisper();
+
   // Support "Open with…" / command-line PDF loading: gms-scroller file.pdf
   const pdfArg = process.argv.slice(1).find((a) => /\.pdf$/i.test(a));
   if (pdfArg && fs.existsSync(pdfArg)) {
@@ -643,9 +685,11 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   stopListening();
+  shutdownWhisper();
   if (process.platform !== 'darwin') app.quit();
 });
 
 app.on('before-quit', () => {
   stopListening();
+  shutdownWhisper();
 });

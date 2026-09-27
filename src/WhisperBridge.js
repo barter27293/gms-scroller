@@ -4,10 +4,10 @@ const path = require('path');
 const readline = require('readline');
 
 class WhisperBridge extends EventEmitter {
-  constructor({ pythonCmd = 'python', model = 'small', workerPath } = {}) {
+  constructor({ pythonCmd = 'python', modelPath = null, workerPath } = {}) {
     super();
     this.pythonCmd = pythonCmd;
-    this.model = model;
+    this.modelPath = modelPath;
     this.workerPath = workerPath || path.join(__dirname, '..', 'python', 'whisper_worker.py');
     this.proc = null;
   }
@@ -15,7 +15,13 @@ class WhisperBridge extends EventEmitter {
   start() {
     if (this.proc) return;
 
-    const env = { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1', WHISPER_MODEL: this.model };
+    const env = { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' };
+    if (this.modelPath) {
+      // Bundled model: load from disk and forbid huggingface_hub from touching
+      // the network (TLS-inspecting proxies make any Hub call fail).
+      env.WHISPER_MODEL_PATH = this.modelPath;
+      env.HF_HUB_OFFLINE = '1';
+    }
     const proc = spawn(this.pythonCmd, ['-u', this.workerPath], {
       stdio: ['pipe', 'pipe', 'pipe'],
       env,

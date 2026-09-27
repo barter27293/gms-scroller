@@ -103,17 +103,6 @@
           <p class="hint">Controls how the transcript text matches the audio stream.</p>
 
           <label>
-            <span>Speech recognition model <em>(larger = more accurate, slower; first use downloads the model)</em></span>
-            <select id="settings-whisper-model">
-              <option value="tiny">tiny (~75 MB, fastest)</option>
-              <option value="base">base (~140 MB)</option>
-              <option value="small">small (~460 MB, recommended)</option>
-              <option value="medium">medium (~1.5 GB)</option>
-              <option value="large-v3">large-v3 (~2.9 GB, most accurate)</option>
-            </select>
-          </label>
-
-          <label>
             <span>Match threshold <em>(lower = stricter; 0.10–0.80)</em></span>
             <input type="number" id="settings-fuse-threshold" min="0.10" max="0.80" step="0.05" />
           </label>

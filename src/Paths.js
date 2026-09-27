@@ -34,6 +34,16 @@ function pythonCmd(isPackaged) {
   return firstExisting(candidates, 'python');
 }
 
+// Bundled Whisper `small` model directory (laid down by fetch-vendor.mjs).
+// Returns null when absent — the worker then falls back to downloading it,
+// which only happens in dev before fetch-vendor has run.
+function whisperModelPath(isPackaged) {
+  const dir = isPackaged
+    ? path.join(process.resourcesPath, 'models', 'faster-whisper-small')
+    : path.join(__dirname, '..', 'vendor', 'models', 'faster-whisper-small');
+  return firstExisting([path.join(dir, 'model.bin')], null) ? dir : null;
+}
+
 // Bundled FFmpeg; falls back to `ffmpeg` on PATH.
 function ffmpegCmd(isPackaged) {
   const candidates = isPackaged
@@ -42,4 +52,4 @@ function ffmpegCmd(isPackaged) {
   return firstExisting(candidates, 'ffmpeg');
 }
 
-module.exports = { whisperWorkerPath, pythonCmd, ffmpegCmd };
+module.exports = { whisperWorkerPath, whisperModelPath, pythonCmd, ffmpegCmd };

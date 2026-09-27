@@ -112,3 +112,21 @@ prompt.
 - First test suite: 28 cases over the alignment engine, unit building, the
   settings migration and the renderer helpers. Run with `npm test` (no new
   dependencies — uses Node's built-in test runner).
+
+## [0.6.0] - 2026-09-27
+
+### Fixed
+- **Speech recognition now works on networks with TLS inspection** (e.g.
+  Streamline3 web filtering). The Whisper `small` model is now included in the
+  installer instead of being downloaded on first use. That download failed
+  with a certificate error, so the app never transcribed anything on those
+  machines.
+
+### Changed
+- **The speech model loads as soon as the app starts**, so it is ready by the
+  time you press play. Before, it only started loading when audio began, and
+  the first 10–20 seconds of a reading could pass before scrolling started.
+  It stays loaded while the app is open.
+- The speech model is always `small`, and the model option has been removed from
+  Settings. Previously selected models such as `large-v3` are reset.
+- The installer is larger (about +480 MB) because it contains the model.

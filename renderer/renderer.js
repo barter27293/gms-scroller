@@ -27,7 +27,6 @@ const els = {
   settingsUsername: document.getElementById('settings-username'),
   settingsPassword: document.getElementById('settings-password'),
   settingsAutosubmit: document.getElementById('settings-autosubmit'),
-  settingsWhisperModel: document.getElementById('settings-whisper-model'),
   settingsShowMatch: document.getElementById('settings-show-match'),
   settingsFuseThreshold: document.getElementById('settings-fuse-threshold'),
   settingsExpansionRate: document.getElementById('settings-expansion-rate'),
@@ -807,8 +806,9 @@ function updateStatus(message, s) {
   if (els.diagStatus) els.diagStatus.textContent = msg || '—';
 }
 
-// Whisper's cold start is slow — first run downloads ~500MB and loading the
-// model takes ~30s. Without this, pressing play looks like nothing happening.
+// Whisper's cold start takes several seconds. main.js now loads the model at
+// app launch, so this usually shows (and clears) before the first play;
+// without it a slow load would look like nothing happening.
 function updateWhisperHint(whisperState) {
   if (!whisperState || els.status.dataset.state === 'lost') return;
   if (/loading|starting/i.test(whisperState)) {
@@ -947,7 +947,6 @@ async function openSettings() {
   try {
     const s = await window.api.getSettings();
     if (s) {
-      els.settingsWhisperModel.value = s.whisperModel || 'small';
       els.settingsShowMatch.checked = s.showMatchDetails !== false;
       els.settingsFuseThreshold.value = s.fuseThreshold ?? 0.35;
       els.settingsExpansionRate.value = s.windowExpansionRate ?? 1.0;
@@ -986,7 +985,6 @@ async function onSaveSettings() {
 
   // Tuning / advanced settings
   const settingsPayload = {
-    whisperModel: els.settingsWhisperModel.value,
     showMatchDetails: els.settingsShowMatch.checked,
     fuseThreshold: parseFloat(els.settingsFuseThreshold.value),
     windowExpansionRate: parseFloat(els.settingsExpansionRate.value),

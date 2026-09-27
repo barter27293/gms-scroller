@@ -4,6 +4,7 @@ out/
 # Bundled runtimes fetched at build time by scripts/fetch-vendor.mjs
 vendor/ffmpeg/
 vendor/python/
+vendor/models/
 vendor/tmp/
 *.log
 __pycache__/
