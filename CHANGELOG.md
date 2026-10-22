@@ -130,3 +130,14 @@ prompt.
 - The speech model is always `small`, and the model option has been removed from
   Settings. Previously selected models such as `large-v3` are reset.
 - The installer is larger (about +480 MB) because it contains the model.
+
+## [0.6.1] - 2026-10-22
+
+### Fixed
+- **Page numbers no longer appear in the transcript.** Footers such as
+  "WB 1039 30" were sometimes inserted mid-sentence where one page ran on to
+  the next.
+- **The copyright / terms page is now always removed.** On some PDFs it was
+  shown at the top of the transcript.
+- The "Extracted from … White Book" note and the closing date no longer appear
+  as extra paragraphs at the end.
