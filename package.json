@@ -1,6 +1,6 @@
 {
   "name": "gms-scroller",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Desktop app that embeds the GMS audio website and auto-scrolls a PDF transcript using real-time speech-to-text.",
   "main": "main.js",
   "private": true,

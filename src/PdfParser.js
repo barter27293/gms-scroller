@@ -23,6 +23,33 @@ const COLUMN_GAP_PT = 25;
 // Page numbers and watermark residue form digit-only lines of their own.
 const DIGITS_LINE = /^[\d\s.,:;()\p{Pd}−]*\d[\d\s.,:;()\p{Pd}−]*$/u;
 const PAGE_CODE = /^[A-Z]{1,4}\s*\d{1,4}$/;
+// Running headers/footers: lines in the outer band of the page whose text
+// (digits ignored, word order ignored) recurs at the same height on many
+// pages. Word order is ignored because odd/even pages mirror the layout
+// ("29  WB 1039" vs "WB 1039  30").
+const MARGIN_BAND_RATIO = 0.12;
+const RUNNING_LINE_Y_BUCKET_PT = 2;
+const RUNNING_LINE_MIN_PAGES = 3;
+const RUNNING_LINE_PAGE_SHARE = 0.5;
+// The T&Cs page is recognised by its content, not its position, so it is
+// removed even when title detection fails. Two markers are required so a
+// sermon that mentions one of these phrases in passing keeps its page.
+const TERMS_MARKERS = [
+  /Copyright\s*©/i,
+  /All rights reserved/i,
+  /Bible and Gospel Trust/i,
+  /Helpful Ministry for the Saints/i,
+  /not disclose the content of the work/i,
+  /Plymouth Brethren Christian Church/i,
+];
+const TERMS_MIN_MARKERS = 2;
+// End matter: the "Extracted from BDH White Book 1039" note (also on the
+// cover) and the bare closing date line. The title's date line always has a
+// weekday ("Lord's day, …"), so it never matches BARE_DATE_LINE.
+const EXTRACT_NOTE = /^Extract(?:ed)?\s+from\b.*\d+\.?$/;
+const MONTH = '(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|June?|July?|Aug(?:ust)?|Sept?(?:ember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\\.?';
+const DAY = '\\d{1,2}(?:st|nd|rd|th)?';
+const BARE_DATE_LINE = new RegExp(`^(?:${MONTH}\\s+${DAY},?|${DAY}\\s+${MONTH},?)\\s+\\d{4}\\.?$`, 'i');
 const KEY_TO_INITIALS = /\bKEY\s+TO\s+INITIALS\b/i;
 const HEADING_PATTERN = /\b(?:SCRIPTURES READ|READINGS?\s+(?:IN|AT)|PREACHING\s+(?:IN|AT)|MEETING\s+(?:IN|AT)|MINISTRY\s+(?:IN|AT)|ADDRESS\s+(?:IN|AT)|FELLOWSHIP\s+(?:IN|AT)|GOSPEL PREACHING|BIBLE READING)\b/;
 const INTENTIONALLY_BLANK = /this is intentionally left blank\.?/gi;
@@ -116,6 +143,60 @@ function groupIntoLines(items) {
   }
 
   return lines.filter((l) => l.text.length > 0);
+}
+
+// A footer's page number and book code ("WB 1039", "30") are separate items
+// at the same height, so groupIntoLines merges them into one line that no
+// single-text regex matches. Check each item on its own instead.
+function isPageFurnitureLine(line) {
+  return line.parts.every((part) => {
+    const str = part.str.trim();
+    return !str || PAGE_CODE.test(str) || DIGITS_LINE.test(str);
+  });
+}
+
+function isEndMatterLine(line) {
+  return EXTRACT_NOTE.test(line.text) || BARE_DATE_LINE.test(line.text);
+}
+
+// A page that also carries a heading (e.g. the title block) is left to the
+// title/heading trimming in parse() so the heading isn't lost with it.
+function isTermsPage(lines) {
+  if (lines.some((l) => HEADING_PATTERN.test(l.text))) return false;
+  const text = lines.map((l) => l.text).join(' ');
+  return TERMS_MARKERS.filter((re) => re.test(text)).length >= TERMS_MIN_MARKERS;
+}
+
+function runningLineSignature(line) {
+  const band = line.pageHeight * MARGIN_BAND_RATIO;
+  let edge;
+  if (line.y < band) edge = 'bottom';
+  else if (line.y > line.pageHeight - band) edge = 'top';
+  else return null;
+  const tokens = line.text.replace(/\d+/g, '#').split(/\s+/).filter(Boolean).sort();
+  return `${edge}|${Math.round(line.y / RUNNING_LINE_Y_BUCKET_PT)}|${tokens.join(' ')}`;
+}
+
+function dropRunningHeadersFooters(lines, verbose = false) {
+  const pagesBySig = new Map();
+  for (const line of lines) {
+    const sig = runningLineSignature(line);
+    if (!sig) continue;
+    if (!pagesBySig.has(sig)) pagesBySig.set(sig, new Set());
+    pagesBySig.get(sig).add(line.pageNum);
+  }
+
+  const pageCount = new Set(lines.map((l) => l.pageNum)).size;
+  const minPages = Math.max(RUNNING_LINE_MIN_PAGES, Math.ceil(pageCount * RUNNING_LINE_PAGE_SHARE));
+  const running = new Set();
+  for (const [sig, pages] of pagesBySig) {
+    if (pages.size < minPages) continue;
+    running.add(sig);
+    if (verbose) console.log(`[PdfParser] running header/footer on ${pages.size} pages: "${sig}"`);
+  }
+
+  const kept = lines.filter((line) => !running.has(runningLineSignature(line)));
+  return { lines: kept, dropped: lines.length - kept.length };
 }
 
 function splitRowByColumnGaps(row) {
@@ -436,19 +517,27 @@ async function parse(filePath, opts = {}) {
     disableFontFace: true,
     standardFontDataUrl: STANDARD_FONT_DATA_URL,
   }).promise;
-  const allLines = [];
+  const pageLines = [];
 
   for (let pageNum = 1; pageNum <= doc.numPages; pageNum++) {
     const page = await doc.getPage(pageNum);
     const content = await page.getTextContent();
     const items = filterItems(content.items);
     if (items.length === 0) continue;
-    const lines = groupIntoLines(items).filter(
-      (line) => !PAGE_CODE.test(line.text) && !DIGITS_LINE.test(line.text)
-    );
-    for (const line of lines) line.pageNum = pageNum;
-    allLines.push(...lines);
+    const lines = groupIntoLines(items);
+    if (isTermsPage(lines)) {
+      if (verbose) console.log(`[PdfParser] dropped T&Cs page ${pageNum}`);
+      continue;
+    }
+    const pageHeight = page.getViewport({ scale: 1 }).height;
+    for (const line of lines) {
+      line.pageNum = pageNum;
+      line.pageHeight = pageHeight;
+    }
+    pageLines.push(...lines.filter((line) => !isPageFurnitureLine(line) && !isEndMatterLine(line)));
   }
+
+  const { lines: allLines, dropped: droppedRunning } = dropRunningHeadersFooters(pageLines, verbose);
 
   const { title, blockStart, blockEnd } = detectTitle(allLines);
   if (title) {
@@ -462,7 +551,11 @@ async function parse(filePath, opts = {}) {
   // in that case only the title lines are removed so the scriptures survive.
   let linesAfterTitle = allLines;
   if (blockStart >= 0) {
-    const firstHeadingIdx = allLines.findIndex((l) => HEADING_PATTERN.test(l.text));
+    // The title's own meeting line ("PREACHING AT SYDNEY") matches
+    // HEADING_PATTERN, so skip the title block when looking for a heading.
+    const firstHeadingIdx = allLines.findIndex(
+      (l, idx) => (idx < blockStart || idx > blockEnd) && HEADING_PATTERN.test(l.text)
+    );
     if (firstHeadingIdx === -1 || firstHeadingIdx > blockStart) {
       linesAfterTitle = allLines.slice(blockEnd + 1);
     } else {
@@ -498,9 +591,13 @@ async function parse(filePath, opts = {}) {
   const attached = attachSpeakers(paragraphs, speakers);
   // Always print a one-line summary. Detail comes from opts.verbose above.
   console.log(
-    `[PdfParser] parsed ${attached.length} paragraphs, ${speakers.size} speakers, ${droppedFooters} footers dropped`
+    `[PdfParser] parsed ${attached.length} paragraphs, ${speakers.size} speakers, ${droppedFooters} footers dropped, ${droppedRunning} running header/footer lines dropped`
   );
   return { title, paragraphs: attached };
 }
 
-module.exports = { parse };
+module.exports = {
+  parse,
+  // Exposed for tests only.
+  _internal: { isPageFurnitureLine, isEndMatterLine, isTermsPage, dropRunningHeadersFooters },
+};
